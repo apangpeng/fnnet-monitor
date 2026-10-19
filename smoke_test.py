@@ -74,7 +74,7 @@ def main():
             print(server.stdout.read(2000))
             return 1
 
-        check("version", st == 200 and j.get("version") == "1.3.14", str(j.get("version")))
+        check("version", st == 200 and j.get("version") == "1.3.15", str(j.get("version")))
 
         # DC: 未设口令 → setup 流程
         st, j = req("GET", "/api/dc/status")
@@ -99,7 +99,24 @@ def main():
         st, j = req("POST", "/api/dc/config", {"speed_mbps": 5, "daily_gb": 10, "download_mode": "none"}, token=TOKEN)
         check("dc config save", st == 200 and j.get("ok") is True, str(j))
         st, j = req("GET", "/api/dc/config", token=TOKEN)
-        check("dc config read", st == 200 and j.get("speed_mbps") == 5 and j.get("daily_gb") == 10, str(j))
+        check("dc config read", st == 200 and j.get("speed_mbps") == 5 and j.get("daily_gb") == 10
+              and j.get("check_minutes") == 5, str(j))
+
+        # DC: 达成后复查间隔自定义（30 分钟）
+        st, j = req("POST", "/api/dc/config", {"speed_mbps": 5, "daily_gb": 10, "check_minutes": 30}, token=TOKEN)
+        check("dc config check save", st == 200 and j.get("ok") is True, str(j))
+        st, j = req("GET", "/api/dc/config", token=TOKEN)
+        check("dc config check read", st == 200 and j.get("check_minutes") == 30, str(j))
+
+        # DC: 复查间隔填 0 = 达成后彻底暂停（合法）
+        st, j = req("POST", "/api/dc/config", {"speed_mbps": 5, "daily_gb": 10, "check_minutes": 0}, token=TOKEN)
+        check("dc config check zero ok", st == 200 and j.get("ok") is True, str(j))
+        st, j = req("GET", "/api/dc/config", token=TOKEN)
+        check("dc config check zero read", st == 200 and j.get("check_minutes") == 0, str(j))
+
+        # DC: 复查间隔超上限被拒绝
+        st, j = req("POST", "/api/dc/config", {"speed_mbps": 5, "daily_gb": 10, "check_minutes": 2000}, token=TOKEN)
+        check("dc config reject check", st == 200 and j.get("ok") is False, str(j))
 
         # DC: 填 0 = 不限速 / 不限流量（合法）
         st, j = req("POST", "/api/dc/config", {"speed_mbps": 0, "daily_gb": 0}, token=TOKEN)

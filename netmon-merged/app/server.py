@@ -45,7 +45,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.14"
+VERSION = "1.3.15"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -1066,6 +1066,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg = dc_read_cfg(data_dir)
             return self._send_json({"ok": True, "speed_mbps": cfg['speed'],
                                     "daily_gb": cfg['daily_gb'],
+                                    "check_minutes": cfg['check_minutes'],
                                     "download_mode": cfg['mode']})
         if path == "/api/dc/urls":
             if not self._dc_authed():
@@ -1120,9 +1121,19 @@ class Handler(BaseHTTPRequestHandler):
                         need_speed = int(daily * 1024 / (86400 * 0.95)) + 1
                         raise ValueError('按限速 %d MB/s 连续下载 24 小时最多约 %d GB，目标 %d GB 当天无法完成：请把每日目标调低到 %d GB 以内，或把下行限速提高到 %d MB/s 以上（目标填 0 可不限量）' % (speed, daily_max, daily, daily_max, need_speed))
                 mode = 'none'  # 下载方式固定为不落盘
+                cm = data.get('check_minutes')
+                if cm is None:
+                    cm = dc_read_cfg(data_dir)['check_minutes']  # 兼容旧前端：不传则保留原值
+                else:
+                    try:
+                        cm = int(cm)
+                    except Exception:
+                        raise ValueError('达成后复查间隔需填 0~1440 分钟（0=达成后彻底暂停等明天）')
+                    if not (0 <= cm <= 1440):
+                        raise ValueError('达成后复查间隔需填 0~1440 分钟（0=达成后彻底暂停等明天）')
                 with open(dc_paths(data_dir)["config"], 'w', encoding='utf-8') as f:
-                    f.write('SPEED_MBPS=%d\nDAILY_GB=%d\nDOWNLOAD_MODE=%s\n' % (speed, daily, mode))
-                dc_log(data_dir, '配置已更新：限速 %d MB/s（0=不限速），每日目标 %d GB（0=不限流量），下载方式不落盘' % (speed, daily))
+                    f.write('SPEED_MBPS=%d\nDAILY_GB=%d\nCHECK_MINUTES=%d\nDOWNLOAD_MODE=%s\n' % (speed, daily, cm, mode))
+                dc_log(data_dir, '配置已更新：限速 %d MB/s（0=不限速），每日目标 %d GB（0=不限流量），达成后每 %d 分钟复查（0=达成后暂停等明天），下载方式不落盘' % (speed, daily, cm))
                 return self._send_json({"ok": True})
             except Exception as e:
                 return self._send_json({"ok": False, "error": '参数不合法：%s' % e})
@@ -1251,7 +1262,7 @@ def dc_ensure_files(data_dir):
     os.makedirs(p["dldir"], exist_ok=True)
     if not os.path.exists(p["config"]):
         with open(p["config"], "w", encoding="utf-8") as f:
-            f.write('SPEED_MBPS=100\nDAILY_GB=5000\nDOWNLOAD_MODE=none\n')
+            f.write('SPEED_MBPS=100\nDAILY_GB=5000\nCHECK_MINUTES=5\nDOWNLOAD_MODE=none\n')
     if not os.path.exists(p["urls"]):
         with open(p["urls"], "w", encoding="utf-8") as f:
             f.write('\n'.join(DC_DEFAULT_URLS) + '\n')
@@ -1263,7 +1274,7 @@ def dc_num(v, default):
 
 
 def dc_read_cfg(data_dir):
-    cfg = {'SPEED_MBPS': '100', 'DAILY_GB': '5000', 'DOWNLOAD_MODE': 'none'}
+    cfg = {'SPEED_MBPS': '100', 'DAILY_GB': '5000', 'CHECK_MINUTES': '5', 'DOWNLOAD_MODE': 'none'}
     try:
         with open(dc_paths(data_dir)["config"], encoding="utf-8") as f:
             for line in f:
@@ -1276,6 +1287,7 @@ def dc_read_cfg(data_dir):
     mode = 'none'  # 下载方式固定为不落盘（数据直接丢弃、仅统计流量，不写盘不磨损硬盘）
     return {'speed': dc_num(cfg.get('SPEED_MBPS'), 100),
             'daily_gb': dc_num(cfg.get('DAILY_GB'), 5000),
+            'check_minutes': dc_num(cfg.get('CHECK_MINUTES'), 5),
             'mode': mode}
 
 
@@ -1441,9 +1453,21 @@ class DCDownloader:
                 target = daily_gb * 1000000000
                 # daily_gb=0 表示不限流量：跳过每日目标判断，持续下载
                 if daily_gb > 0 and pu >= target:
-                    dc_log(self.data_dir, '今日目标已达（%d GB），暂停下载等待明天（每 5 分钟复查，改大目标即可继续）' % daily_gb)
-                    if not self._sleep(300):
-                        break
+                    cm = cfg['check_minutes']
+                    if cm > 0:
+                        dc_log(self.data_dir, '今日目标已达（%d GB），暂停下载（每 %d 分钟复查，改大目标即可继续）' % (daily_gb, cm))
+                        if not self._sleep(cm * 60):
+                            break
+                    else:
+                        # 0 = 达成后彻底暂停：不周期复查，轻量等待跨天自动恢复
+                        dc_log(self.data_dir, '今日目标已达（%d GB），暂停下载等待明天（复查间隔=0，不复查，跨天自动恢复）' % daily_gb)
+                        while not self.stop_event.is_set():
+                            if datetime.date.today().isoformat() != d:
+                                break
+                            if not self._sleep(60):
+                                break
+                        if self.stop_event.is_set():
+                            break
                     continue
                 urls = dc_read_urls(self.data_dir)
                 if not urls:

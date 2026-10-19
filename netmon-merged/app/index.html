@@ -386,6 +386,8 @@
   <input type="number" id="dc-speed" min="0" max="99999" placeholder="100">
   <label class="lbl">每日消耗目标（GB）：填 <b style="color:var(--yellow)">0</b> = 不限流量</label>
   <input type="number" id="dc-daily" min="0" max="9999999" placeholder="5000">
+  <label class="lbl">达成后复查间隔（分钟）：目标达成后每 N 分钟复查一次（改大目标即可立即继续），填 <b style="color:var(--yellow)">0</b> = 达成后彻底暂停，等明天自动恢复</label>
+  <input type="number" id="dc-check" min="0" max="1440" placeholder="5">
   <label class="lbl">下载方式：不落盘（固定）</label>
   <div class="desc" style="margin-top:6px">不落盘：数据直接丢弃，仅统计流量，不写盘不磨损硬盘。本应用固定为不落盘运行。</div>
   <div class="row">
@@ -1038,8 +1040,13 @@ async function dcLoadUrls(){
 async function dcSaveConfig(){
   const speed = parseInt($('dc-speed').value, 10);
   const daily = parseInt($('dc-daily').value, 10);
+  const check = parseInt($('dc-check').value, 10);
   if (isNaN(speed) || speed < 0 || speed > 99999 || isNaN(daily) || daily < 0 || daily > 9999999) {
     dcShowMsg('dc-cfg-msg', false, '限速与目标需填 0 或正数（0 = 不限）');
+    return;
+  }
+  if (isNaN(check) || check < 0 || check > 1440) {
+    dcShowMsg('dc-cfg-msg', false, '复查间隔需填 0~1440 分钟（0 = 达成后彻底暂停等明天）');
     return;
   }
   if (speed > 0 && daily > 0){
@@ -1050,7 +1057,7 @@ async function dcSaveConfig(){
       return;
     }
   }
-  const r = await dcJpost('/api/dc/config', { speed_mbps: speed, daily_gb: daily });
+  const r = await dcJpost('/api/dc/config', { speed_mbps: speed, daily_gb: daily, check_minutes: check });
   dcShowMsg('dc-cfg-msg', r.ok, r.ok ? '参数已保存，下一轮生效' : (r.error || '保存失败'));
   dcLoadStatus();
 }
@@ -1104,6 +1111,7 @@ async function dcStartApp(){
   if (data.ok){
     $('dc-speed').value = data.speed_mbps;
     $('dc-daily').value = data.daily_gb;
+    $('dc-check').value = data.check_minutes;
   }
   setInterval(dcLoadStatus, 4000);
 }
