@@ -342,6 +342,24 @@
   <p style="color:var(--muted);font-size:11px;margin-top:8px">
     说明：这里列出虚拟机（vnet）、Docker 容器等虚拟网卡的流量。可在右上角「⚙ 设置」给每张网卡起别名（如"网心云"、"甜糖"）。
   </p>
+
+  <h2 style="margin-top:16px"><span class="dot"></span>连接流量排行（全网卡）
+    <span class="spacer"></span>
+    <span class="pill">按远端 IP / 进程 · 实时速率</span>
+  </h2>
+  <p style="color:var(--muted);font-size:11px;margin-bottom:8px">
+    按目标 IP 聚合<u>所有网口</u>（物理网口 + PCDN 虚拟网口）上的 TCP 连接实时带宽，可看出流量具体去向哪台机器、由哪个进程产生；UDP 流量（QUIC/语音等）单独列出、无进程名。速率每 2 秒采样刷新。
+  </p>
+  <div class="table-wrap">
+  <table id="conn-top-table">
+    <thead><tr>
+      <th>远端 IP</th><th>类型</th><th>进程</th>
+      <th>实时下行</th><th>实时上行</th>
+      <th>累计下行</th><th>累计上行</th><th>连接数</th>
+    </tr></thead>
+    <tbody id="conn-top-list"></tbody>
+  </table>
+  </div>
 </div>
 
 <!-- 下行带宽消耗器（PCDN 业务子版块，原独立应用 downstream-consumer 并入） -->
@@ -902,6 +920,36 @@ async function refreshBizTable() {
   }).join("");
 }
 
+// 连接流量排行：全网卡按远端 IP + 进程聚合（TCP ss + UDP conntrack）
+async function refreshConnTop() {
+  const d = await jget("/api/conn_top");
+  if (!d) return;
+  const body = $("conn-top-list");
+  if (!d.available || (!(d.top||[]).length && !(d.udp||[]).length)) {
+    body.innerHTML = `<tr><td colspan="8" class="empty">暂无连接流量数据（需在 Linux 上运行）</td></tr>`;
+    return;
+  }
+  const rows = [];
+  for (const r of (d.top||[])) {
+    rows.push(Object.assign({type:"TCP", procTxt:(r.proc||"—")+(r.pid? " · PID "+r.pid : "")}, r));
+  }
+  for (const r of (d.udp||[])) {
+    rows.push(Object.assign({type:"UDP", procTxt:"—（UDP 无进程名）"}, r));
+  }
+  rows.sort((a,b)=>(b.rx_rate+b.tx_rate)-(a.rx_rate+a.tx_rate));
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td style="font-family:Consolas,Menlo,monospace">${r.ip}</td>
+      <td><span class="pill ${r.type==='TCP'?'ok':''}">${r.type}</span></td>
+      <td style="max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.procTxt}</td>
+      <td class="rx-c">${fmtBps(r.rx_rate)}</td>
+      <td class="tx-c">${fmtBps(r.tx_rate)}</td>
+      <td>${fmtBytes(r.rx_bytes)}</td>
+      <td>${fmtBytes(r.tx_bytes)}</td>
+      <td>${r.conns}</td>
+    </tr>`).join("");
+}
+
 // 设置弹窗
 let currentCfg = {};
 async function openSettings() {
@@ -1146,12 +1194,13 @@ $('btn-dc-token').addEventListener('click', dcChangeToken);
 $('dc-submit-auth').addEventListener('click', dcSubmitAuth);
 $('dc-cancel-auth').addEventListener('click', function(){ $('dc-auth-overlay').style.display = 'none'; });
 
-refreshNet(); refreshPorts(); refreshTraffic(); refreshHistory(); refreshBizTable(); dcInit();
+refreshNet(); refreshPorts(); refreshTraffic(); refreshHistory(); refreshBizTable(); refreshConnTop(); dcInit();
 setInterval(refreshNet, 2000);
 setInterval(refreshPorts, 5000);
 setInterval(refreshTraffic, 5000);
 setInterval(refreshHistory, 5000);
 setInterval(refreshBizTable, 5000);
+setInterval(refreshConnTop, 3000);
 
 jget("/api/info").then(d => { if (d) { $("ver").textContent = "v"+d.version; $("host").textContent = d.host; } });
 </script>
