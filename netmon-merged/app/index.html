@@ -925,8 +925,17 @@ async function refreshConnTop() {
   const d = await jget("/api/conn_top");
   if (!d) return;
   const body = $("conn-top-list");
-  if (!d.available || (!(d.top||[]).length && !(d.udp||[]).length)) {
-    body.innerHTML = `<tr><td colspan="8" class="empty">暂无连接流量数据（需在 Linux 上运行）</td></tr>`;
+  if (!d.available) {
+    const dbg = d.debug || {};
+    let why = "需在 Linux 上运行";
+    if (dbg.error) why = "采集异常：" + dbg.error;
+    else if (dbg.ss_rc === -1 && dbg.conntrack === false) why = "ss 与 conntrack 均不可用（需 Linux + iproute2）";
+    else if (dbg.ss_rc !== 0) why = "ss 命令返回码 " + dbg.ss_rc + (dbg.ss_err ? "：" + dbg.ss_err : "");
+    body.innerHTML = `<tr><td colspan="8" class="empty">连接排行暂不可用：${why}</td></tr>`;
+    return;
+  }
+  if (!(d.top||[]).length && !(d.udp||[]).length) {
+    body.innerHTML = `<tr><td colspan="8" class="empty">暂无活动连接（有流量产生时会自动出现）</td></tr>`;
     return;
   }
   const rows = [];

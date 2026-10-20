@@ -74,7 +74,7 @@ def main():
             print(server.stdout.read(2000))
             return 1
 
-        check("version", st == 200 and j.get("version") == "1.3.16", str(j.get("version")))
+        check("version", st == 200 and j.get("version") == "1.3.17", str(j.get("version")))
 
         # DC: 未设口令 → setup 流程
         st, j = req("GET", "/api/dc/status")
@@ -187,12 +187,15 @@ def main():
         check("ports have group/desc",
               len(pl) == 0 or all(("group" in p and "desc" in p) for p in pl),
               "listeners=%d" % len(pl))
-        # 连接流量排行（v1.3.16）：结构存在，非 Linux 下 available=False 且 top/udp 为列表
+        # 连接流量排行（v1.3.16+）：结构存在，非 Linux 下 available=False 且 top/udp 为列表
         st, j = req("GET", "/api/conn_top")
         check("api conn_top", st == 200 and "available" in j and "top" in j and "udp" in j
               and isinstance(j.get("top"), list) and isinstance(j.get("udp"), list), str(st))
-        check("conn_top structure", j.get("available") is False and j.get("top") == [] and j.get("udp") == [],
-              "available=%s top=%d udp=%d" % (j.get("available"), len(j.get("top", [])), len(j.get("udp", []))))
+        check("conn_top structure", j.get("available") is False and j.get("top") == [] and j.get("udp") == []
+              and "debug" in j and "ss_rc" in (j.get("debug") or {}),
+              "available=%s top=%d udp=%d debug=%s" % (
+                  j.get("available"), len(j.get("top", [])), len(j.get("udp", [])),
+                  json.dumps(j.get("debug", {}), ensure_ascii=False)[:80]))
         # index: 直接读字节确认新面板存在
         import urllib.request as u2
         try:

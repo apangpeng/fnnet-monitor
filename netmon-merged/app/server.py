@@ -46,7 +46,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.16"
+VERSION = "1.3.17"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -78,6 +78,17 @@ def run_cmd(argv, timeout=8):
         return p.stdout, p.returncode
     except Exception:
         return "", -1
+
+
+def run_cmd3(argv, timeout=8):
+    """返回 (stdout, returncode, stderr)，供连接排行诊断用。"""
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return p.stdout, p.returncode, p.stderr or ""
+    except subprocess.TimeoutExpired:
+        return "", -1, "timeout"
+    except Exception as e:
+        return "", -1, str(e)
 
 
 def is_linux():
@@ -456,15 +467,20 @@ def _remote_host(remote):
 
 
 def parse_ss_conn_top():
-    """ss -tinp state established → [{ip, proc, pid, rx, tx, conns}]
-    rx = 本端收到（bytes_received，下行）、tx = 本端发出（bytes_acked，上行）。
-    非 Linux 或 ss 不可用返回 []。"""
+    """ss -tinp state established → (rows, diag)。
+    rows: [{ip, proc, pid, rx, tx, conns}]；rx=本端收到（下行）、tx=本端发出（上行）。
+    diag: {"rc", "lines", "err"} 供排障。非 Linux / ss 不可用 rows=[]。"""
     rows = []
+    diag = {"rc": -1, "lines": 0, "err": ""}
     if not is_linux():
-        return rows
-    txt, rc = run_cmd(["ss", "-tinp", "state", "established"], timeout=10)
+        diag["err"] = "非 Linux 环境"
+        return rows, diag
+    txt, rc, err = run_cmd3(["ss", "-tinp", "state", "established"], timeout=15)
+    diag["rc"] = rc
+    diag["lines"] = len(txt.splitlines()) if txt else 0
+    diag["err"] = (err or "")[:200]
     if rc != 0 or not txt:
-        return rows
+        return rows, diag
     conns = []
     cur = None
     for line in txt.splitlines():
@@ -510,19 +526,19 @@ def parse_ss_conn_top():
         e["rx"] += c["rx"]
         e["tx"] += c["tx"]
         e["conns"] += 1
-    return list(agg.values())
+    return list(agg.values()), diag
 
 
 def parse_conntrack_udp(local_ips):
     """/proc/net/nf_conntrack 的 UDP 条目按远端 IP 聚合字节（无进程名）。
-    local_ips: 本机 IP 规范化集合。返回 [{ip, rx, tx, conns}]。
+    local_ips: 本机 IP 规范化集合。返回 (rows, readable)。
     两端都非本机 IP 的行（如 NAT 中间态）无法判断方向，跳过。"""
     rows = []
     if not is_linux():
-        return rows
+        return rows, False
     txt = read_text("/proc/net/nf_conntrack")
     if not txt:
-        return rows
+        return rows, False
     agg = {}
     for line in txt.splitlines():
         if " udp " not in line:
@@ -566,7 +582,7 @@ def parse_conntrack_udp(local_ips):
         e["rx"] += rx
         e["tx"] += tx
         e["conns"] += 1
-    return list(agg.values())
+    return list(agg.values()), True
 
 
 # ---------------------------------------------------------------------------
@@ -848,7 +864,8 @@ class Collector:
         self._last_vnet_ts = 0
         self._conn_prev = {}          # (kind, ...) -> (ts, rx, tx)，连接排行速率采样
         self.vnet_map = {}
-        self.conn_top = {"available": False, "top": [], "udp": [], "ts": 0}
+        self.conn_top = {"available": False, "top": [], "udp": [], "ts": 0,
+                         "debug": {"ss_rc": -1, "ss_lines": 0, "ss_err": "", "conntrack": False, "error": ""}}
         self.snapshot = {
             "ifaces": [], "snmp": {}, "snmp6": {}, "conn": {},
             "routes": {}, "docker": {"available": False, "containers": []},
@@ -970,52 +987,64 @@ class Collector:
 
     def _collect_conn_top(self, now, addrs):
         """连接流量排行：TCP（ss 每连接累计字节）+ UDP（conntrack），
-        两次采样差值得实时速率；按远端 IP + 进程聚合，返回 {available, top, udp, ts}。"""
-        tcp = parse_ss_conn_top()
-        udp = parse_conntrack_udp(collect_local_ips(addrs))
-        prev = self._conn_prev
-        out_tcp, out_udp = [], []
-        for e in tcp:
-            key = ("t", e["ip"], e["proc"], e["pid"])
-            p = prev.get(key)
-            rx_rate = tx_rate = 0.0
-            if p and now > p[0]:
-                dt = now - p[0]
-                if dt > 0:
-                    rx_rate = max(0, e["rx"] - p[1]) / dt
-                    tx_rate = max(0, e["tx"] - p[2]) / dt
-            out_tcp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1)))
-        for e in udp:
-            key = ("u", e["ip"])
-            p = prev.get(key)
-            rx_rate = tx_rate = 0.0
-            if p and now > p[0]:
-                dt = now - p[0]
-                if dt > 0:
-                    rx_rate = max(0, e["rx"] - p[1]) / dt
-                    tx_rate = max(0, e["tx"] - p[2]) / dt
-            out_udp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1)))
-        # 更新采样基准（限制规模，防连接频繁变动导致内存膨胀）
-        new_prev = {}
-        for e in tcp:
-            new_prev[("t", e["ip"], e["proc"], e["pid"])] = (now, e["rx"], e["tx"])
-        for e in udp:
-            new_prev[("u", e["ip"])] = (now, e["rx"], e["tx"])
-        if len(new_prev) < 2000:
-            for k, v in prev.items():
-                if k not in new_prev:
-                    new_prev[k] = v
-                    if len(new_prev) >= 2000:
-                        break
-        self._conn_prev = new_prev
-        out_tcp.sort(key=lambda x: x["rx_rate"] + x["tx_rate"], reverse=True)
-        out_udp.sort(key=lambda x: x["rx_rate"] + x["tx_rate"], reverse=True)
-        return {
-            "available": is_linux(),
-            "top": out_tcp[:20],
-            "udp": out_udp[:10],
-            "ts": now,
-        }
+        两次采样差值得实时速率；按远端 IP + 进程聚合。
+        返回 {available, top, udp, ts, debug}；debug 含诊断信息（ss 返回码/行数/错误），
+        采集异常被隔离并写入 debug.error，避免整轮 tick 中断。"""
+        diag = {"ss_rc": -1, "ss_lines": 0, "ss_err": "", "conntrack": False, "error": ""}
+        try:
+            tcp, sdiag = parse_ss_conn_top()
+            diag["ss_rc"], diag["ss_lines"], diag["ss_err"] = sdiag["rc"], sdiag["lines"], sdiag["err"]
+            udp, ct_ok = parse_conntrack_udp(collect_local_ips(addrs))
+            diag["conntrack"] = ct_ok
+            prev = self._conn_prev
+            out_tcp, out_udp = [], []
+            for e in tcp:
+                key = ("t", e["ip"], e["proc"], e["pid"])
+                p = prev.get(key)
+                rx_rate = tx_rate = 0.0
+                if p and now > p[0]:
+                    dt = now - p[0]
+                    if dt > 0:
+                        rx_rate = max(0, e["rx"] - p[1]) / dt
+                        tx_rate = max(0, e["tx"] - p[2]) / dt
+                out_tcp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1)))
+            for e in udp:
+                key = ("u", e["ip"])
+                p = prev.get(key)
+                rx_rate = tx_rate = 0.0
+                if p and now > p[0]:
+                    dt = now - p[0]
+                    if dt > 0:
+                        rx_rate = max(0, e["rx"] - p[1]) / dt
+                        tx_rate = max(0, e["tx"] - p[2]) / dt
+                out_udp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1)))
+            # 更新采样基准（限制规模，防连接频繁变动导致内存膨胀）
+            new_prev = {}
+            for e in tcp:
+                new_prev[("t", e["ip"], e["proc"], e["pid"])] = (now, e["rx"], e["tx"])
+            for e in udp:
+                new_prev[("u", e["ip"])] = (now, e["rx"], e["tx"])
+            if len(new_prev) < 2000:
+                for k, v in prev.items():
+                    if k not in new_prev:
+                        new_prev[k] = v
+                        if len(new_prev) >= 2000:
+                            break
+            self._conn_prev = new_prev
+            out_tcp.sort(key=lambda x: x["rx_rate"] + x["tx_rate"], reverse=True)
+            out_udp.sort(key=lambda x: x["rx_rate"] + x["tx_rate"], reverse=True)
+            # 数据源任一可用即算功能可用
+            usable = diag["ss_rc"] == 0 or ct_ok
+            return {
+                "available": is_linux() and usable,
+                "top": out_tcp[:20],
+                "udp": out_udp[:10],
+                "ts": now,
+                "debug": diag,
+            }
+        except Exception as e:
+            diag["error"] = str(e)[:300]
+            return {"available": False, "top": [], "udp": [], "ts": now, "debug": diag}
 
 
 # ---------------------------------------------------------------------------
