@@ -47,7 +47,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.21"
+VERSION = "1.3.22"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -101,41 +101,44 @@ def is_linux():
 # ---------------------------------------------------------------------------
 
 class XdbSearcher(object):
-    """ip2region v3 xdb 查询器（纯 Python，无第三方依赖）。
+    """ip2region v3 xdb 查询器（纯 Python，无第三方依赖），支持 IPv4 + IPv6。
     文件结构：Header 256B（实际用 16B）→ Vector 索引 512KiB → 地域信息段 → 二分索引段。
-    IPv4 二分索引项 14B：startIP(4) + endIP(4) + dataLen(2) + dataPtr(4)，均小端。"""
+    IPv4 二分索引项 14B：startIP(4) + endIP(4) + dataLen(2) + dataPtr(4)；
+    IPv6 二分索引项 38B：startIP(16) + endIP(16) + dataLen(2) + dataPtr(4)；均小端。"""
+
+    V4_FIXED = 14
+    V6_FIXED = 38
 
     def __init__(self, path):
         self._data = open(path, "rb").read()
         self._idx_start = struct.unpack("<I", self._data[8:12])[0]
         self._idx_end = struct.unpack("<I", self._data[12:16])[0]
 
-    @staticmethod
-    def _ip2uint(ip):
-        try:
-            return struct.unpack(">I", ipaddress.ip_address(ip).packed)[0]
-        except Exception:
-            return None
-
     def search(self, ip):
-        val = self._ip2uint(ip)
-        if val is None:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except Exception:
             return ""
+        if addr.version == 4:
+            return self._search_v4(struct.unpack(">I", addr.packed)[0])
+        return self._search_v6(addr.packed)
+
+    def _search_v4(self, val):
         # vector 索引按 IP 前两字节（0-65535）定位，每项 8B
         vp = 256 + ((val >> 16) & 0xFFFF) * 8
         start_ptr = struct.unpack("<I", self._data[vp:vp + 4])[0]
         end_ptr = struct.unpack("<I", self._data[vp + 4:vp + 8])[0]
-        if end_ptr < start_ptr or end_ptr - start_ptr < 14:
+        if end_ptr < start_ptr or end_ptr - start_ptr < self.V4_FIXED:
             return ""
-        lo, hi = start_ptr, end_ptr - 14
+        lo, hi = start_ptr, end_ptr - self.V4_FIXED
         while lo <= hi:
-            mid = lo + ((hi - lo) // 14) * 14
+            mid = lo + ((hi - lo) // self.V4_FIXED) * self.V4_FIXED
             s_ip = struct.unpack("<I", self._data[mid:mid + 4])[0]
             e_ip = struct.unpack("<I", self._data[mid + 4:mid + 8])[0]
             if val < s_ip:
-                hi = mid - 14
+                hi = mid - self.V4_FIXED
             elif val > e_ip:
-                lo = mid + 14
+                lo = mid + self.V4_FIXED
             else:
                 dlen = struct.unpack("<H", self._data[mid + 8:mid + 10])[0]
                 dptr = struct.unpack("<I", self._data[mid + 10:mid + 14])[0]
@@ -145,21 +148,53 @@ class XdbSearcher(object):
                     return ""
         return ""
 
+    def _search_v6(self, packed):
+        # vector 索引按 IPv6 前 16 位（第一个 hextet）定位，每项 8B
+        vp = 256 + (int.from_bytes(packed[0:2], "big")) * 8
+        start_ptr = struct.unpack("<I", self._data[vp:vp + 4])[0]
+        end_ptr = struct.unpack("<I", self._data[vp + 4:vp + 8])[0]
+        if end_ptr < start_ptr or end_ptr - start_ptr < self.V6_FIXED:
+            return ""
+        lo, hi = start_ptr, end_ptr - self.V6_FIXED
+        while lo <= hi:
+            mid = lo + ((hi - lo) // self.V6_FIXED) * self.V6_FIXED
+            s_ip = self._data[mid:mid + 16]
+            e_ip = self._data[mid + 16:mid + 32]
+            if packed < s_ip:
+                hi = mid - self.V6_FIXED
+            elif packed > e_ip:
+                lo = mid + self.V6_FIXED
+            else:
+                dlen = struct.unpack("<H", self._data[mid + 32:mid + 34])[0]
+                dptr = struct.unpack("<I", self._data[mid + 34:mid + 38])[0]
+                try:
+                    return self._data[dptr:dptr + dlen].decode("utf-8", "ignore")
+                except Exception:
+                    return ""
+        return ""
 
-_xdb_searcher = None
+
+_xdb_v4 = None
+_xdb_v6 = None
 _xdb_region_cache = {}
 
 
 def get_xdb():
-    global _xdb_searcher
-    if _xdb_searcher is None:
+    """加载 IPv4 / IPv6 两个离线库（惰性，失败置 False 避免重复尝试）。"""
+    global _xdb_v4, _xdb_v6
+    if _xdb_v4 is None:
         try:
             p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ip2region_v4.xdb")
-            if os.path.exists(p):
-                _xdb_searcher = XdbSearcher(p)
+            _xdb_v4 = XdbSearcher(p) if os.path.exists(p) else False
         except Exception:
-            _xdb_searcher = False
-    return _xdb_searcher
+            _xdb_v4 = False
+    if _xdb_v6 is None:
+        try:
+            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ip2region_v6.xdb")
+            _xdb_v6 = XdbSearcher(p) if os.path.exists(p) else False
+        except Exception:
+            _xdb_v6 = False
+    return _xdb_v4, _xdb_v6
 
 
 def _norm_region(parts):
@@ -178,25 +213,26 @@ def _norm_region(parts):
 
 
 def ip_region(ip):
-    """离线查询 IP 归属地。IPv6 / 内网 / 失败返回空串。带缓存。"""
-    if not ip or ":" in ip:
+    """离线查询 IP 归属地（IPv4 + IPv6）。内网 / 失败返回空串。带缓存。"""
+    if not ip:
         return ""
     try:
-        if ipaddress.ip_address(ip).is_private or ipaddress.ip_address(ip).is_loopback \
-                or ipaddress.ip_address(ip).is_link_local:
-            return ""
+        addr = ipaddress.ip_address(ip)
     except Exception:
+        return ""
+    if addr.is_private or addr.is_loopback or addr.is_link_local:
         return ""
     hit = _xdb_region_cache.get(ip)
     if hit is not None:
         return hit
-    searcher = get_xdb()
+    v4s, v6s = get_xdb()
+    searcher = v6s if addr.version == 6 else v4s
     region = ""
     if searcher:
         raw = searcher.search(ip)
         if raw:
             region = _norm_region(raw.split("|"))
-    if len(_xdb_region_cache) > 4096:
+    if len(_xdb_region_cache) > 8192:
         _xdb_region_cache.clear()
     _xdb_region_cache[ip] = region
     return region
