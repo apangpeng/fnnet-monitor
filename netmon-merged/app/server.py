@@ -47,7 +47,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.20"
+VERSION = "1.3.21"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -800,52 +800,6 @@ def parse_conntrack(local_ips):
         e["tx"] += tx
         e["conns"] += 1
     return list(agg_t.values()), list(agg_u.values()), True
-    conns = []
-    cur = None
-    for line in txt.splitlines():
-        s = line.strip()
-        if not s:
-            if cur is not None:
-                conns.append(cur)
-                cur = None
-            continue
-        if s.startswith("ESTAB"):
-            if cur is not None:
-                conns.append(cur)
-            p = s.split()
-            cur = None
-            if len(p) >= 5:
-                cur = {"remote": p[4], "proc": "?", "pid": 0, "rx": 0, "tx": 0}
-            continue
-        if cur is None:
-            continue
-        m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', s)
-        if m:
-            cur["proc"] = m.group(1)
-            cur["pid"] = int(m.group(2))
-        m = re.search(r"bytes_acked:(\d+)", s)
-        if m:
-            cur["tx"] = int(m.group(1))
-        m = re.search(r"bytes_received:(\d+)", s)
-        if m:
-            cur["rx"] = int(m.group(1))
-    if cur is not None:
-        conns.append(cur)
-    # 按 远端IP + 进程 聚合
-    agg = {}
-    for c in conns:
-        ip = _remote_host(c["remote"])
-        if not ip or ip == "*":
-            continue
-        key = (ip, c["proc"], c["pid"])
-        e = agg.get(key)
-        if e is None:
-            e = {"ip": ip, "proc": c["proc"], "pid": c["pid"], "rx": 0, "tx": 0, "conns": 0}
-            agg[key] = e
-        e["rx"] += c["rx"]
-        e["tx"] += c["tx"]
-        e["conns"] += 1
-    return list(agg.values()), diag
 
 
 # ---------------------------------------------------------------------------
@@ -1262,12 +1216,19 @@ class Collector:
                 sdiag["rc"], sdiag["lines"], sdiag["err"], sdiag["head"]
             ct_tcp, ct_udp, ct_ok = parse_conntrack(collect_local_ips(addrs))
             diag["conntrack"] = ct_ok
-            # ss 没解析出 ESTAB 时，用 conntrack 的 TCP 数据兜底（无进程名），保证"流量去向"仍可见
-            if not tcp and ct_tcp:
-                tcp = ct_tcp
-                diag["fallback"] = "conntrack-tcp"
-            for e in tcp:
-                e["ct"] = True
+            # 合并 ss + conntrack：ss 行带进程名优先；conntrack 补充 ss 未覆盖的远端 IP
+            # （无进程名，标记 ct=True）。两者都显示，宿主进程流量和虚拟机流量互不遗漏。
+            ss_ips = set(e["ip"] for e in tcp)
+            merged = list(tcp)
+            if ct_tcp:
+                for e in ct_tcp:
+                    e.setdefault("proc", "")
+                    e.setdefault("pid", 0)
+                    e["ct"] = True
+                    if e["ip"] not in ss_ips:
+                        merged.append(e)
+                diag["fallback"] = "conntrack-tcp" if not tcp else "merged"
+            tcp = merged
             udp = ct_udp
             for e in udp:
                 e["ct"] = True
