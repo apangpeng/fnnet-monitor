@@ -353,14 +353,13 @@
   <div class="table-wrap">
   <table id="conn-top-table">
     <thead><tr>
-      <th>远端 IP</th><th>类型</th><th>进程</th>
+      <th>远端 IP / 归属地</th><th>类型</th><th>进程</th>
       <th>实时下行</th><th>实时上行</th>
       <th>累计下行</th><th>累计上行</th><th>连接数</th>
     </tr></thead>
     <tbody id="conn-top-list"></tbody>
   </table>
   </div>
-  <div id="conn-top-dbg" style="color:var(--muted);font-size:10px;margin-top:6px;word-break:break-all;font-family:Consolas,Menlo,monospace"></div>
 </div>
 
 <!-- 下行带宽消耗器（PCDN 业务子版块，原独立应用 downstream-consumer 并入） -->
@@ -922,19 +921,10 @@ async function refreshBizTable() {
 }
 
 // 连接流量排行：全网卡按远端 IP + 进程聚合（TCP ss + UDP conntrack）
-function connTopDbgText(d) {
-  const dbg = d.debug || {};
-  const parts = ["ss_rc=" + dbg.ss_rc, "ss_lines=" + dbg.ss_lines,
-    dbg.ss_err ? "err=" + dbg.ss_err : "",
-    dbg.fallback ? "数据源=" + dbg.fallback : "",
-    dbg.ss_head ? "ss输出=" + dbg.ss_head : ""].filter(Boolean);
-  return parts.join(" | ");
-}
 async function refreshConnTop() {
   const d = await jget("/api/conn_top");
   if (!d) return;
   const body = $("conn-top-list");
-  const dbgEl = $("conn-top-dbg");
   if (!d.available) {
     const dbg = d.debug || {};
     let why = "需在 Linux 上运行";
@@ -942,12 +932,10 @@ async function refreshConnTop() {
     else if (dbg.ss_rc === -1 && dbg.conntrack === false) why = "ss 与 conntrack 均不可用（需 Linux + iproute2）";
     else if (dbg.ss_rc !== 0) why = "ss 命令返回码 " + dbg.ss_rc + (dbg.ss_err ? "：" + dbg.ss_err : "");
     body.innerHTML = `<tr><td colspan="8" class="empty">连接排行暂不可用：${why}</td></tr>`;
-    dbgEl.textContent = connTopDbgText(d);
     return;
   }
   if (!(d.top||[]).length && !(d.udp||[]).length) {
     body.innerHTML = `<tr><td colspan="8" class="empty">暂无活动连接（有流量产生时会自动出现）</td></tr>`;
-    dbgEl.textContent = connTopDbgText(d);
     return;
   }
   const rows = [];
@@ -960,7 +948,7 @@ async function refreshConnTop() {
   rows.sort((a,b)=>(b.rx_rate+b.tx_rate)-(a.rx_rate+a.tx_rate));
   body.innerHTML = rows.map(r => `
     <tr>
-      <td style="font-family:Consolas,Menlo,monospace">${r.ip}</td>
+      <td style="font-family:Consolas,Menlo,monospace;white-space:nowrap">${r.ip}<div style="color:var(--muted);font-size:11px;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif">${r.region ? r.region : (r.ip.indexOf(":") >= 0 ? "IPv6（暂不收录）" : "内网 / 未知")}</div></td>
       <td><span class="pill ${r.type==='TCP'?'ok':''}">${r.type}</span></td>
       <td style="max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.procTxt}</td>
       <td class="rx-c">${fmtBps(r.rx_rate)}</td>
@@ -969,7 +957,6 @@ async function refreshConnTop() {
       <td>${fmtBytes(r.tx_bytes)}</td>
       <td>${r.conns}</td>
     </tr>`).join("");
-  dbgEl.textContent = connTopDbgText(d);
 }
 
 // 设置弹窗
