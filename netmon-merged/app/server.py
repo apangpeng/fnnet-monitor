@@ -37,6 +37,7 @@ import re
 import signal
 import socket
 import sqlite3
+import struct
 import subprocess
 import sys
 import threading
@@ -46,7 +47,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.18"
+VERSION = "1.3.19"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -93,6 +94,146 @@ def run_cmd3(argv, timeout=8):
 
 def is_linux():
     return sys.platform.startswith("linux")
+
+
+# ---------------------------------------------------------------------------
+# IP 归属地（离线 ip2region v3 xdb，仅 IPv4；IPv6 暂不收录）
+# ---------------------------------------------------------------------------
+
+class XdbSearcher(object):
+    """ip2region v3 xdb 查询器（纯 Python，无第三方依赖）。
+    文件结构：Header 256B（实际用 16B）→ Vector 索引 512KiB → 地域信息段 → 二分索引段。
+    IPv4 二分索引项 14B：startIP(4) + endIP(4) + dataLen(2) + dataPtr(4)，均小端。"""
+
+    def __init__(self, path):
+        self._data = open(path, "rb").read()
+        self._idx_start = struct.unpack("<I", self._data[8:12])[0]
+        self._idx_end = struct.unpack("<I", self._data[12:16])[0]
+
+    @staticmethod
+    def _ip2uint(ip):
+        try:
+            return struct.unpack(">I", ipaddress.ip_address(ip).packed)[0]
+        except Exception:
+            return None
+
+    def search(self, ip):
+        val = self._ip2uint(ip)
+        if val is None:
+            return ""
+        # vector 索引按 IP 前两字节（0-65535）定位，每项 8B
+        vp = 256 + ((val >> 16) & 0xFFFF) * 8
+        start_ptr = struct.unpack("<I", self._data[vp:vp + 4])[0]
+        end_ptr = struct.unpack("<I", self._data[vp + 4:vp + 8])[0]
+        if end_ptr < start_ptr or end_ptr - start_ptr < 14:
+            return ""
+        lo, hi = start_ptr, end_ptr - 14
+        while lo <= hi:
+            mid = lo + ((hi - lo) // 14) * 14
+            s_ip = struct.unpack("<I", self._data[mid:mid + 4])[0]
+            e_ip = struct.unpack("<I", self._data[mid + 4:mid + 8])[0]
+            if val < s_ip:
+                hi = mid - 14
+            elif val > e_ip:
+                lo = mid + 14
+            else:
+                dlen = struct.unpack("<H", self._data[mid + 8:mid + 10])[0]
+                dptr = struct.unpack("<I", self._data[mid + 10:mid + 14])[0]
+                try:
+                    return self._data[dptr:dptr + dlen].decode("utf-8", "ignore")
+                except Exception:
+                    return ""
+        return ""
+
+
+_xdb_searcher = None
+_xdb_region_cache = {}
+
+
+def get_xdb():
+    global _xdb_searcher
+    if _xdb_searcher is None:
+        try:
+            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ip2region_v4.xdb")
+            if os.path.exists(p):
+                _xdb_searcher = XdbSearcher(p)
+        except Exception:
+            _xdb_searcher = False
+    return _xdb_searcher
+
+
+def _norm_region(parts):
+    """把 xdb 的 国家|省|市|ISP|国家码（可能 4~5 段，含 0/Reserved 占位）整理成展示文本。"""
+    out = []
+    for s in parts:
+        s = (s or "").strip()
+        if not s or s in ("0", "-", "Reserved", "保留地址", "内网IP", "未分配"):
+            continue
+        # 结尾的国家码（CN/US/AU...）不展示
+        if len(s) == 2 and s.isalpha() and s.isupper():
+            continue
+        if s not in out:
+            out.append(s)
+    return " ".join(out)
+
+
+def ip_region(ip):
+    """离线查询 IP 归属地。IPv6 / 内网 / 失败返回空串。带缓存。"""
+    if not ip or ":" in ip:
+        return ""
+    try:
+        if ipaddress.ip_address(ip).is_private or ipaddress.ip_address(ip).is_loopback \
+                or ipaddress.ip_address(ip).is_link_local:
+            return ""
+    except Exception:
+        return ""
+    hit = _xdb_region_cache.get(ip)
+    if hit is not None:
+        return hit
+    searcher = get_xdb()
+    region = ""
+    if searcher:
+        raw = searcher.search(ip)
+        if raw:
+            region = _norm_region(raw.split("|"))
+    if len(_xdb_region_cache) > 4096:
+        _xdb_region_cache.clear()
+    _xdb_region_cache[ip] = region
+    return region
+
+
+# 常见进程友好名（仅用于连接排行展示，不影响功能）
+PROC_FRIENDLY = {
+    "P2PClient": "网心云客户端",
+    "trim-qbittorren": "qBittorrent",
+    "xunlei-pan-cli": "迅雷云盘",
+    "beam.smp": "Erlang 节点",
+    "epmd": "Erlang 端口映射",
+    "postgres": "PostgreSQL",
+    "docs": "飞牛文档",
+    "webdav": "WebDAV",
+    "minidlnad": "MiniDLNA 媒体",
+    "upnp_service": "UPnP 服务",
+    "cloud_storage_d": "云存储",
+    "baiduNas": "百度网盘",
+    "seekbox": "SeekBox",
+    "openclaw": "龙虾应用",
+    "fntermx": "终端",
+    "Xkasmvnc": "VNC 远程桌面",
+    "fygo-browser-ga": "浏览器",
+    "smbftpd": "SMB/FTP",
+    "rpcbind": "RPC 绑定",
+    "rpc.statd": "NFS 状态",
+    "rpc.mountd": "NFS 挂载",
+    "docker-proxy": "Docker 端口代理",
+    "wsdd2": "WSDD 发现",
+}
+
+
+def friendly_proc(name):
+    if not name:
+        return ""
+    return PROC_FRIENDLY.get(name, name)
 
 
 # ---------------------------------------------------------------------------
@@ -1077,7 +1218,9 @@ class Collector:
                     if dt > 0:
                         rx_rate = max(0, e["rx"] - p[1]) / dt
                         tx_rate = max(0, e["tx"] - p[2]) / dt
-                out_tcp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1)))
+                out_tcp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1),
+                                    region=ip_region(e["ip"]),
+                                    proc=friendly_proc(e.get("proc", ""))))
             for e in udp:
                 key = ("u", e["ip"])
                 p = prev.get(key)
@@ -1087,7 +1230,8 @@ class Collector:
                     if dt > 0:
                         rx_rate = max(0, e["rx"] - p[1]) / dt
                         tx_rate = max(0, e["tx"] - p[2]) / dt
-                out_udp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1)))
+                out_udp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1),
+                                    region=ip_region(e["ip"])))
             # 更新采样基准（限制规模，防连接频繁变动导致内存膨胀）
             new_prev = {}
             for e in tcp:
