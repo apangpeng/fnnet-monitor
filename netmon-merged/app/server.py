@@ -47,7 +47,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.19"
+VERSION = "1.3.20"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -234,6 +234,70 @@ def friendly_proc(name):
     if not name:
         return ""
     return PROC_FRIENDLY.get(name, name)
+
+
+# ---------------------------------------------------------------------------
+# 路由出口网卡（连接排行标注"哪个网口出的"，最长前缀匹配）
+# ---------------------------------------------------------------------------
+
+_routes_cache = {"ts": 0.0, "routes": []}
+
+
+def collect_routes_map():
+    """读取主路由表（IPv4 + IPv6）→ [(dest, prefixlen, iface)]，30 秒缓存。"""
+    now = time.time()
+    if now - _routes_cache["ts"] < 30 and _routes_cache["routes"]:
+        return _routes_cache["routes"]
+    routes = []
+    for cmd in (["ip", "route", "show"], ["ip", "-6", "route", "show"]):
+        out, _ = run_cmd(cmd, timeout=4)
+        for line in out.splitlines():
+            p = line.split()
+            if not p:
+                continue
+            if p[0] in ("unreachable", "blackhole", "prohibit", "throw", "local"):
+                continue
+            if p[0] == "default":
+                dest, plen = "0.0.0.0", 0
+                rest = p[1:]
+            elif p[0] == "fe80" or p[0] == "ff00" or "/" in p[0] or ":" not in p[0]:
+                # IPv4 或带前缀的 IPv6：dest 在第一列；"fe80::/64" 也可能带 "/"
+                dest = p[0]
+                if "/" in dest:
+                    dest, plen = dest.split("/", 1)
+                    plen = int(plen)
+                else:
+                    plen = 32 if ":" not in dest else 128
+                rest = p[1:]
+            else:
+                # 不带前缀的 IPv6 地址（/128）
+                dest, plen, rest = p[0], 128, p[1:]
+            if "dev" in rest:
+                iface = rest[rest.index("dev") + 1]
+            else:
+                continue
+            routes.append((dest, plen, iface))
+    _routes_cache["ts"] = now
+    _routes_cache["routes"] = routes
+    return routes
+
+
+def route_iface(ip):
+    """远端 IP → 出口网卡名（最长前缀匹配）。查不到返回 ""。"""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except Exception:
+        return ""
+    best = None
+    for dest, plen, iface in collect_routes_map():
+        try:
+            net = ipaddress.ip_network("%s/%d" % (dest, plen), strict=False)
+        except Exception:
+            continue
+        if addr.version == net.version and addr in net:
+            if best is None or plen > best[0]:
+                best = (plen, iface)
+    return best[1] if best else ""
 
 
 # ---------------------------------------------------------------------------
@@ -1209,6 +1273,8 @@ class Collector:
                 e["ct"] = True
             prev = self._conn_prev
             out_tcp, out_udp = [], []
+            aliases = self.config.get("aliases", {}) if hasattr(self, "config") else {}
+            vnet_map = getattr(self, "vnet_map", {}) or {}
             for e in tcp:
                 key = ("t", e["ip"], e["proc"], e["pid"])
                 p = prev.get(key)
@@ -1218,9 +1284,12 @@ class Collector:
                     if dt > 0:
                         rx_rate = max(0, e["rx"] - p[1]) / dt
                         tx_rate = max(0, e["tx"] - p[2]) / dt
+                iface = route_iface(e["ip"])
+                iface_lbl = aliases.get(iface) or vnet_map.get(iface) or iface
                 out_tcp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1),
                                     region=ip_region(e["ip"]),
-                                    proc=friendly_proc(e.get("proc", ""))))
+                                    proc=friendly_proc(e.get("proc", "")),
+                                    iface=iface, iface_lbl=iface_lbl))
             for e in udp:
                 key = ("u", e["ip"])
                 p = prev.get(key)
@@ -1230,8 +1299,11 @@ class Collector:
                     if dt > 0:
                         rx_rate = max(0, e["rx"] - p[1]) / dt
                         tx_rate = max(0, e["tx"] - p[2]) / dt
+                iface = route_iface(e["ip"])
+                iface_lbl = aliases.get(iface) or vnet_map.get(iface) or iface
                 out_udp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1),
-                                    region=ip_region(e["ip"])))
+                                    region=ip_region(e["ip"]),
+                                    iface=iface, iface_lbl=iface_lbl))
             # 更新采样基准（限制规模，防连接频繁变动导致内存膨胀）
             new_prev = {}
             for e in tcp:
