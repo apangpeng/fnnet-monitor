@@ -74,7 +74,7 @@ def main():
             print(server.stdout.read(2000))
             return 1
 
-        check("version", st == 200 and j.get("version") == "1.3.17", str(j.get("version")))
+        check("version", st == 200 and j.get("version") == "1.3.18", str(j.get("version")))
 
         # DC: 未设口令 → setup 流程
         st, j = req("GET", "/api/dc/status")
