@@ -948,13 +948,13 @@ async function refreshConnTop() {
   rows.sort((a,b)=>(b.rx_rate+b.tx_rate)-(a.rx_rate+a.tx_rate));
   body.innerHTML = rows.map(r => `
     <tr>
-      <td style="font-family:Consolas,Menlo,monospace;white-space:nowrap">${r.ip}<div style="color:var(--muted);font-size:11px;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif">${r.region ? r.region : (r.ip.indexOf(":") >= 0 ? "IPv6（暂不收录）" : "内网 / 未知")}</div></td>
+      <td style="font-family:Consolas,Menlo,monospace;white-space:nowrap">${r.ip}<div style="color:var(--muted);font-size:11px;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif">${r.region ? r.region : (r.ip.indexOf(":") >= 0 ? "IPv6（暂不收录）" : "内网 / 未知")}${r.iface_lbl ? " · 经 " + r.iface_lbl : ""}</div></td>
       <td><span class="pill ${r.type==='TCP'?'ok':''}">${r.type}</span></td>
       <td style="max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.procTxt}</td>
       <td class="rx-c">${fmtBps(r.rx_rate)}</td>
       <td class="tx-c">${fmtBps(r.tx_rate)}</td>
-      <td>${fmtBytes(r.rx_bytes)}</td>
-      <td>${fmtBytes(r.tx_bytes)}</td>
+      <td>${fmtBytes(r.rx)}</td>
+      <td>${fmtBytes(r.tx)}</td>
       <td>${r.conns}</td>
     </tr>`).join("");
 }
