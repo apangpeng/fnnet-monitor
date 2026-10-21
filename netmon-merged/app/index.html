@@ -360,6 +360,7 @@
     <tbody id="conn-top-list"></tbody>
   </table>
   </div>
+  <div id="conn-top-dbg" style="color:var(--muted);font-size:10px;margin-top:6px;word-break:break-all;font-family:Consolas,Menlo,monospace"></div>
 </div>
 
 <!-- 下行带宽消耗器（PCDN 业务子版块，原独立应用 downstream-consumer 并入） -->
@@ -921,10 +922,19 @@ async function refreshBizTable() {
 }
 
 // 连接流量排行：全网卡按远端 IP + 进程聚合（TCP ss + UDP conntrack）
+function connTopDbgText(d) {
+  const dbg = d.debug || {};
+  const parts = ["ss_rc=" + dbg.ss_rc, "ss_lines=" + dbg.ss_lines,
+    dbg.ss_err ? "err=" + dbg.ss_err : "",
+    dbg.fallback ? "数据源=" + dbg.fallback : "",
+    dbg.ss_head ? "ss输出=" + dbg.ss_head : ""].filter(Boolean);
+  return parts.join(" | ");
+}
 async function refreshConnTop() {
   const d = await jget("/api/conn_top");
   if (!d) return;
   const body = $("conn-top-list");
+  const dbgEl = $("conn-top-dbg");
   if (!d.available) {
     const dbg = d.debug || {};
     let why = "需在 Linux 上运行";
@@ -932,18 +942,20 @@ async function refreshConnTop() {
     else if (dbg.ss_rc === -1 && dbg.conntrack === false) why = "ss 与 conntrack 均不可用（需 Linux + iproute2）";
     else if (dbg.ss_rc !== 0) why = "ss 命令返回码 " + dbg.ss_rc + (dbg.ss_err ? "：" + dbg.ss_err : "");
     body.innerHTML = `<tr><td colspan="8" class="empty">连接排行暂不可用：${why}</td></tr>`;
+    dbgEl.textContent = connTopDbgText(d);
     return;
   }
   if (!(d.top||[]).length && !(d.udp||[]).length) {
     body.innerHTML = `<tr><td colspan="8" class="empty">暂无活动连接（有流量产生时会自动出现）</td></tr>`;
+    dbgEl.textContent = connTopDbgText(d);
     return;
   }
   const rows = [];
   for (const r of (d.top||[])) {
-    rows.push(Object.assign({type:"TCP", procTxt:(r.proc||"—")+(r.pid? " · PID "+r.pid : "")}, r));
+    rows.push(Object.assign({type:"TCP", procTxt: r.ct ? "TCP（conntrack，无进程名）" : (r.proc||"—")+(r.pid? " · PID "+r.pid : "")}, r));
   }
   for (const r of (d.udp||[])) {
-    rows.push(Object.assign({type:"UDP", procTxt:"—（UDP 无进程名）"}, r));
+    rows.push(Object.assign({type:"UDP", procTxt:"UDP（conntrack，无进程名）"}, r));
   }
   rows.sort((a,b)=>(b.rx_rate+b.tx_rate)-(a.rx_rate+a.tx_rate));
   body.innerHTML = rows.map(r => `
@@ -957,6 +969,7 @@ async function refreshConnTop() {
       <td>${fmtBytes(r.tx_bytes)}</td>
       <td>${r.conns}</td>
     </tr>`).join("");
+  dbgEl.textContent = connTopDbgText(d);
 }
 
 // 设置弹窗
