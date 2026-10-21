@@ -46,7 +46,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.17"
+VERSION = "1.3.18"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -467,20 +467,134 @@ def _remote_host(remote):
 
 
 def parse_ss_conn_top():
-    """ss -tinp state established → (rows, diag)。
+    """ss -tinp → (rows, diag)。
+    不依赖 state established 过滤器（兼容各版本 ss），解析时只认 ESTAB 行。
     rows: [{ip, proc, pid, rx, tx, conns}]；rx=本端收到（下行）、tx=本端发出（上行）。
-    diag: {"rc", "lines", "err"} 供排障。非 Linux / ss 不可用 rows=[]。"""
+    diag: {"rc", "lines", "err", "head"}；head=ss 原始输出前 800 字符（供排障）。"""
     rows = []
-    diag = {"rc": -1, "lines": 0, "err": ""}
+    diag = {"rc": -1, "lines": 0, "err": "", "head": ""}
     if not is_linux():
         diag["err"] = "非 Linux 环境"
         return rows, diag
-    txt, rc, err = run_cmd3(["ss", "-tinp", "state", "established"], timeout=15)
+    txt, rc, err = run_cmd3(["ss", "-tinp"], timeout=15)
     diag["rc"] = rc
     diag["lines"] = len(txt.splitlines()) if txt else 0
     diag["err"] = (err or "")[:200]
+    diag["head"] = txt[:800] if txt else ""
     if rc != 0 or not txt:
         return rows, diag
+    conns = []
+    cur = None
+    for line in txt.splitlines():
+        s = line.strip()
+        if not s:
+            if cur is not None:
+                conns.append(cur)
+                cur = None
+            continue
+        if s.startswith("ESTAB"):
+            if cur is not None:
+                conns.append(cur)
+            p = s.split()
+            cur = None
+            if len(p) >= 5:
+                cur = {"remote": p[4], "proc": "?", "pid": 0, "rx": 0, "tx": 0}
+            continue
+        if cur is None:
+            continue
+        m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', s)
+        if m:
+            cur["proc"] = m.group(1)
+            cur["pid"] = int(m.group(2))
+        m = re.search(r"bytes_acked:(\d+)", s)
+        if m:
+            cur["tx"] = int(m.group(1))
+        else:
+            m = re.search(r"bytes_sent:(\d+)", s)
+            if m:
+                cur["tx"] = int(m.group(1))
+        m = re.search(r"bytes_received:(\d+)", s)
+        if m:
+            cur["rx"] = int(m.group(1))
+        else:
+            m = re.search(r"bytes_recv:(\d+)", s)
+            if m:
+                cur["rx"] = int(m.group(1))
+    if cur is not None:
+        conns.append(cur)
+    # 按 远端IP + 进程 聚合
+    agg = {}
+    for c in conns:
+        ip = _remote_host(c["remote"])
+        if not ip or ip == "*":
+            continue
+        key = (ip, c["proc"], c["pid"])
+        e = agg.get(key)
+        if e is None:
+            e = {"ip": ip, "proc": c["proc"], "pid": c["pid"], "rx": 0, "tx": 0, "conns": 0}
+            agg[key] = e
+        e["rx"] += c["rx"]
+        e["tx"] += c["tx"]
+        e["conns"] += 1
+    return list(agg.values()), diag
+
+
+def parse_conntrack(local_ips):
+    """/proc/net/nf_conntrack 的 TCP+UDP 条目按远端 IP 聚合字节（无进程名）。
+    local_ips: 本机 IP 规范化集合。返回 (tcp_rows, udp_rows, readable)。
+    两端都非本机 IP 的行（如 NAT 中间态）无法判断方向，跳过。"""
+    tcp_rows, udp_rows = [], []
+    if not is_linux():
+        return tcp_rows, udp_rows, False
+    txt = read_text("/proc/net/nf_conntrack")
+    if not txt:
+        return tcp_rows, udp_rows, False
+    agg_t, agg_u = {}, {}
+    for line in txt.splitlines():
+        if " tcp " not in line and " udp " not in line:
+            continue
+        is_udp = " udp " in line
+        blocks = []
+        cur = {}
+        for tok in line.split():
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                if k in ("src", "dst", "sport", "dport", "packets", "bytes"):
+                    cur[k] = v
+                    continue
+            if "src" in cur and "bytes" in cur:
+                blocks.append(cur)
+            cur = {}
+        if "src" in cur and "bytes" in cur:
+            blocks.append(cur)
+        if not blocks:
+            continue
+        rx = tx = 0
+        remote = None
+        for b in blocks:
+            src = norm_ip(b.get("src", ""))
+            dst = norm_ip(b.get("dst", ""))
+            try:
+                bts = int(b.get("bytes", 0) or 0)
+            except Exception:
+                bts = 0
+            if src in local_ips:
+                tx += bts
+                remote = dst or remote
+            elif dst in local_ips:
+                rx += bts
+                remote = src or remote
+        if remote is None:
+            continue
+        agg = agg_u if is_udp else agg_t
+        e = agg.get(remote)
+        if e is None:
+            e = {"ip": remote, "rx": 0, "tx": 0, "conns": 0}
+            agg[remote] = e
+        e["rx"] += rx
+        e["tx"] += tx
+        e["conns"] += 1
+    return list(agg_t.values()), list(agg_u.values()), True
     conns = []
     cur = None
     for line in txt.splitlines():
@@ -527,62 +641,6 @@ def parse_ss_conn_top():
         e["tx"] += c["tx"]
         e["conns"] += 1
     return list(agg.values()), diag
-
-
-def parse_conntrack_udp(local_ips):
-    """/proc/net/nf_conntrack 的 UDP 条目按远端 IP 聚合字节（无进程名）。
-    local_ips: 本机 IP 规范化集合。返回 (rows, readable)。
-    两端都非本机 IP 的行（如 NAT 中间态）无法判断方向，跳过。"""
-    rows = []
-    if not is_linux():
-        return rows, False
-    txt = read_text("/proc/net/nf_conntrack")
-    if not txt:
-        return rows, False
-    agg = {}
-    for line in txt.splitlines():
-        if " udp " not in line:
-            continue
-        blocks = []
-        cur = {}
-        for tok in line.split():
-            if "=" in tok:
-                k, v = tok.split("=", 1)
-                if k in ("src", "dst", "sport", "dport", "packets", "bytes"):
-                    cur[k] = v
-                    continue
-            if "src" in cur and "bytes" in cur:
-                blocks.append(cur)
-            cur = {}
-        if "src" in cur and "bytes" in cur:
-            blocks.append(cur)
-        if not blocks:
-            continue
-        rx = tx = 0
-        remote = None
-        for b in blocks:
-            src = norm_ip(b.get("src", ""))
-            dst = norm_ip(b.get("dst", ""))
-            try:
-                bts = int(b.get("bytes", 0) or 0)
-            except Exception:
-                bts = 0
-            if src in local_ips:
-                tx += bts
-                remote = dst or remote
-            elif dst in local_ips:
-                rx += bts
-                remote = src or remote
-        if remote is None:
-            continue
-        e = agg.get(remote)
-        if e is None:
-            e = {"ip": remote, "rx": 0, "tx": 0, "conns": 0}
-            agg[remote] = e
-        e["rx"] += rx
-        e["tx"] += tx
-        e["conns"] += 1
-    return list(agg.values()), True
 
 
 # ---------------------------------------------------------------------------
@@ -865,7 +923,8 @@ class Collector:
         self._conn_prev = {}          # (kind, ...) -> (ts, rx, tx)，连接排行速率采样
         self.vnet_map = {}
         self.conn_top = {"available": False, "top": [], "udp": [], "ts": 0,
-                         "debug": {"ss_rc": -1, "ss_lines": 0, "ss_err": "", "conntrack": False, "error": ""}}
+                         "debug": {"ss_rc": -1, "ss_lines": 0, "ss_err": "", "ss_head": "",
+                                   "conntrack": False, "fallback": "", "error": ""}}
         self.snapshot = {
             "ifaces": [], "snmp": {}, "snmp6": {}, "conn": {},
             "routes": {}, "docker": {"available": False, "containers": []},
@@ -990,12 +1049,23 @@ class Collector:
         两次采样差值得实时速率；按远端 IP + 进程聚合。
         返回 {available, top, udp, ts, debug}；debug 含诊断信息（ss 返回码/行数/错误），
         采集异常被隔离并写入 debug.error，避免整轮 tick 中断。"""
-        diag = {"ss_rc": -1, "ss_lines": 0, "ss_err": "", "conntrack": False, "error": ""}
+        diag = {"ss_rc": -1, "ss_lines": 0, "ss_err": "", "ss_head": "", "conntrack": False,
+                "fallback": "", "error": ""}
         try:
             tcp, sdiag = parse_ss_conn_top()
-            diag["ss_rc"], diag["ss_lines"], diag["ss_err"] = sdiag["rc"], sdiag["lines"], sdiag["err"]
-            udp, ct_ok = parse_conntrack_udp(collect_local_ips(addrs))
+            diag["ss_rc"], diag["ss_lines"], diag["ss_err"], diag["ss_head"] = \
+                sdiag["rc"], sdiag["lines"], sdiag["err"], sdiag["head"]
+            ct_tcp, ct_udp, ct_ok = parse_conntrack(collect_local_ips(addrs))
             diag["conntrack"] = ct_ok
+            # ss 没解析出 ESTAB 时，用 conntrack 的 TCP 数据兜底（无进程名），保证"流量去向"仍可见
+            if not tcp and ct_tcp:
+                tcp = ct_tcp
+                diag["fallback"] = "conntrack-tcp"
+            for e in tcp:
+                e["ct"] = True
+            udp = ct_udp
+            for e in udp:
+                e["ct"] = True
             prev = self._conn_prev
             out_tcp, out_udp = [], []
             for e in tcp:
