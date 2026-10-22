@@ -291,7 +291,7 @@
   </div>
 </div>
 
-<div class="panel">
+<div class="panel" id="panel-cumulative">
   <h2><span class="dot"></span>累计流量
     <span class="spacer"></span>
     <span class="pill" id="t-boot">开机 --</span>
@@ -306,8 +306,8 @@
   </div>
 </div>
 
-<!-- PCDN 业务面板 -->
-<div class="panel">
+<!-- PCDN 业务总览（上行带宽占用） -->
+<div class="panel" id="panel-pcdn">
   <h2><span class="dot"></span>PCDN 业务总览（上行带宽占用）</h2>
   <div style="display:grid;grid-template-columns: repeat(4, 1fr);gap:14px;margin-bottom:12px" class="pcdn-cards">
     <div>
@@ -333,8 +333,11 @@
       <div style="color:var(--muted);font-size:11px;margin-top:4px" id="pcdn-quota-pct">--</div>
     </div>
   </div>
+</div>
 
-  <h2 style="margin-top:6px"><span class="dot"></span>业务流量排行（按上行排序）
+<!-- 业务流量排行 -->
+<div class="panel" id="panel-biz">
+  <h2><span class="dot"></span>业务流量排行（按上行排序）
     <span class="spacer"></span>
     <span class="pill">虚拟机 / 容器 / 网卡</span>
   </h2>
@@ -342,8 +345,11 @@
   <p style="color:var(--muted);font-size:11px;margin-top:8px">
     说明：这里列出虚拟机（vnet）、Docker 容器等虚拟网卡的流量。可在右上角「⚙ 设置」给每张网卡起别名（如"网心云"、"甜糖"）。
   </p>
+</div>
 
-  <h2 style="margin-top:16px"><span class="dot"></span>连接流量排行（全网卡）
+<!-- 连接流量排行 -->
+<div class="panel" id="panel-conn">
+  <h2><span class="dot"></span>连接流量排行（全网卡）
     <span class="spacer"></span>
     <span class="pill">按远端 IP / 进程 · 实时速率</span>
   </h2>
@@ -363,7 +369,7 @@
 </div>
 
 <!-- 下行带宽消耗器（PCDN 业务子版块，原独立应用 downstream-consumer 并入） -->
-<div class="panel" id="dc-panel">
+<div class="panel" id="panel-dc">
   <h2><span class="dot"></span>下行带宽消耗器
     <span class="spacer"></span>
     <span class="pill" id="dc-badge">读取中…</span>
@@ -425,7 +431,7 @@
   <pre id="dc-log">-</pre>
 </div>
 
-<div class="panel">
+<div class="panel" id="panel-history">
   <h2><span class="dot"></span>网速历史曲线（物理网卡合计）
     <span class="spacer"></span>
     <span class="range-btns" id="range-btns">
@@ -443,9 +449,9 @@
   </div>
 </div>
 
-<div class="iface-grid" id="iface-cards"></div>
+<div class="iface-grid" id="panel-iface-cards"></div>
 
-<div class="panel">
+<div class="panel" id="panel-iface-detail">
   <h2><span class="dot"></span>网卡详细数据</h2>
   <p style="color:var(--muted);font-size:11px;margin-bottom:8px">
     下表列出所有网卡（含虚拟网卡）的详细计数。"丢包"和"错误"如果长期为 0 表示网络质量良好；数字持续增长建议检查网线、交换机或光猫。
@@ -468,7 +474,7 @@
 </div>
 
 <div class="two-col">
-  <div class="panel">
+  <div class="panel" id="panel-proto">
     <h2><span class="dot"></span>协议整体统计</h2>
     <p style="color:var(--muted);font-size:11px;margin-bottom:8px">
       TCP 是大多数应用（网页、文件、远程）用的协议；重传包越多说明网络越不稳定。
@@ -477,7 +483,7 @@
     <h2 style="margin-top:16px"><span class="dot"></span>连接状态分布</h2>
     <div class="metric-grid" id="conn-kv"></div>
   </div>
-  <div class="panel">
+  <div class="panel" id="panel-ports">
     <h2><span class="dot"></span>正在监听的端口</h2>
     <p style="color:var(--muted);font-size:11px;margin-bottom:8px">
       每个监听中的端口代表一个对外开放的服务（如网页、SSH、下载工具）。
@@ -486,7 +492,7 @@
   </div>
 </div>
 
-<div class="panel">
+<div class="panel" id="panel-docker">
   <h2><span class="dot"></span>Docker 容器流量</h2>
   <p style="color:var(--muted);font-size:11px;margin-bottom:8px">
     每个 Docker 容器自开机以来的累计流量与实时速度，方便找出谁在占用带宽。
@@ -508,7 +514,7 @@
 <!-- 设置弹窗 -->
 <div id="settings-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99;align-items:center;justify-content:center;padding:14px">
   <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px;max-width:480px;width:100%;max-height:90vh;overflow-y:auto">
-    <h2 style="margin:0 0 12px;font-size:15px">⚙ PCDN 与带宽设置</h2>
+    <h2 style="margin:0 0 12px;font-size:15px">⚙ 设置</h2>
     <div style="margin-bottom:12px">
       <label style="display:block;color:var(--muted);font-size:12px;margin-bottom:4px">家宽套餐上行带宽（Mbps，填 0 表示不显示占用率）</label>
       <input id="cfg-upstream" type="number" min="0" step="1" placeholder="例如 30" style="width:100%;padding:8px;background:var(--panel-2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px">
@@ -524,6 +530,11 @@
     <div style="margin-bottom:12px">
       <label style="display:block;color:var(--muted);font-size:12px;margin-bottom:4px">网卡别名（每行一条：网卡名=别名，例如 vnet3=网心云）</label>
       <textarea id="cfg-aliases" rows="4" placeholder="vnet3=网心云&#10;vnet4=甜糖&#10;docker0=Docker网桥" style="width:100%;padding:8px;background:var(--panel-2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:monospace"></textarea>
+    </div>
+    <div style="margin-bottom:12px">
+      <label style="display:block;color:var(--muted);font-size:12px;margin-bottom:4px">板块显示：取消勾选 = 隐藏对应板块（需要时回来勾上即可恢复）</label>
+      <div id="block-settings" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;max-height:180px;overflow-y:auto;padding:2px 0"></div>
+      <button id="btn-blocks-showall" style="margin-top:6px;padding:4px 12px;background:var(--panel-2);color:var(--muted);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px">全部显示</button>
     </div>
     <div style="margin:14px -18px -18px;padding:12px 18px;border-top:1px solid var(--border);background:rgba(248,81,73,0.05)">
       <div style="color:var(--red);font-size:12px;margin-bottom:6px">危险操作</div>
@@ -1017,6 +1028,67 @@ $("btn-reset").addEventListener("click", async () => {
     alert("清零失败");
   }
 });
+
+// ---------- 板块显示设置 ----------
+const BLOCKS = [
+  {id:"panel-cumulative", name:"累计流量"},
+  {id:"panel-pcdn", name:"PCDN 业务总览"},
+  {id:"panel-biz", name:"业务流量排行"},
+  {id:"panel-conn", name:"连接流量排行"},
+  {id:"panel-dc", name:"下行带宽消耗器"},
+  {id:"panel-history", name:"网速历史曲线"},
+  {id:"panel-iface-cards", name:"网卡实时卡片"},
+  {id:"panel-iface-detail", name:"网卡详细数据"},
+  {id:"panel-proto", name:"协议整体统计"},
+  {id:"panel-ports", name:"正在监听的端口"},
+  {id:"panel-docker", name:"Docker 容器流量"},
+];
+function blockHidden(){
+  try { return JSON.parse(localStorage.getItem("netmon_hidden") || "[]"); } catch(e) { return []; }
+}
+function applyBlocks(){
+  const h = blockHidden();
+  BLOCKS.forEach(b => {
+    const el = $(b.id);
+    if (el) el.style.display = h.includes(b.id) ? "none" : "";
+    const cb = $("cb-" + b.id);
+    if (cb) cb.checked = !h.includes(b.id);
+  });
+  // 两列面板：其中一个被隐藏时，另一个占满整行
+  const p1 = $("panel-proto"), p2 = $("panel-ports");
+  if (p1 && p2) {
+    p1.style.gridColumn = h.includes("panel-ports") ? "1 / -1" : "";
+    p2.style.gridColumn = h.includes("panel-proto") ? "1 / -1" : "";
+  }
+}
+function toggleBlock(id, show){
+  let h = blockHidden();
+  h = show ? h.filter(x => x !== id) : (h.includes(id) ? h : h.concat([id]));
+  localStorage.setItem("netmon_hidden", JSON.stringify(h));
+  applyBlocks();
+}
+function buildBlockSettings(){
+  const box = $("block-settings");
+  if (!box) return;
+  box.innerHTML = "";
+  BLOCKS.forEach(b => {
+    const l = document.createElement("label");
+    l.style.cssText = "display:flex;align-items:center;gap:6px;color:var(--text);font-size:13px;cursor:pointer;padding:3px 0";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.id = "cb-" + b.id;
+    cb.checked = true;
+    cb.addEventListener("change", () => toggleBlock(b.id, cb.checked));
+    l.appendChild(cb);
+    l.appendChild(document.createTextNode(b.name));
+    box.appendChild(l);
+  });
+}
+$("btn-blocks-showall").addEventListener("click", () => {
+  localStorage.setItem("netmon_hidden", "[]");
+  applyBlocks();
+});
+buildBlockSettings();
+applyBlocks();
 
 async function refreshHistory() {
   const d = await jget("/api/history?range=" + histRange);
