@@ -6,7 +6,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>网络监控 · DP</title>
+<title>网络监控</title>
 <style>
   :root {
     --bg: #0f1419;
@@ -1336,7 +1336,7 @@ setInterval(refreshHistory, 5000);
 setInterval(refreshBizTable, 5000);
 setInterval(refreshConnTop, 3000);
 
-jget("/api/info").then(d => { if (d) { $("ver").textContent = "v"+d.version; $("host").textContent = d.host; } });
+jget("/api/info").then(d => { if (d) { $("ver").textContent = "v"+d.version; $("host").textContent = d.host; if (d.host) document.title = "网络监控 · " + d.host; } });
 </script>
 </body>
 </html>
