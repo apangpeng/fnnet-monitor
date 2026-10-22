@@ -991,7 +991,8 @@ async function refreshConnTop() {
     const rx = connAvg(h.rx), tx = connAvg(h.tx);
     const stale = now - h.last > 9000;   // 超过 9 秒无新采样 → 保留中（半透明显示）
     const procTxt = isUdp ? "UDP（conntrack，无进程名）"
-      : (r.ct ? "TCP（conntrack，无进程名）" : (r.proc || "—") + (r.pid ? " · PID " + r.pid : ""));
+      : (r.ct ? "TCP（conntrack，无进程名）"
+         : ((r.proc && r.proc !== "?") ? r.proc : "未知进程") + (r.pid ? " · PID " + r.pid : ""));
     rows.push({ip: r.ip, region: r.region, iface_lbl: r.iface_lbl, type: isUdp ? "UDP" : "TCP",
                procTxt, rx, tx, rxr: r.rx, txr: r.tx, conns: r.conns, stale});
   }
