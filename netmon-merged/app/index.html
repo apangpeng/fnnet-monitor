@@ -166,6 +166,9 @@
   .empty { color: var(--muted); text-align: center; padding: 20px; font-size: 12px; }
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
   @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+  /* 连接流量排行：保留中半透明 + 折叠汇总行 */
+  .conn-stale { opacity: .55; }
+  .conn-more td { color: var(--muted); font-size: 12px; text-align: center; padding: 8px; }
 
   footer {
     text-align: center; color: var(--muted); font-size: 11px;
@@ -932,6 +935,19 @@ async function refreshBizTable() {
 }
 
 // 连接流量排行：全网卡按远端 IP + 进程聚合（TCP ss + UDP conntrack）
+// 连接流量排行显示稳定化：速率滑动平均 + 固定 TOP N + 短连接保留观察
+const CONN_SMOOTH_N = 4;      // 速率平滑窗口（采样次数，间隔 3 秒 → 覆盖约 12 秒）
+const CONN_KEEP_MS = 20000;   // 短连接保留观察时间（毫秒，期间行不消失）
+const CONN_TOP_N = 20;        // 固定显示条数，其余折叠为汇总行
+let connHist = {};            // key="T|ip"/"U|ip" -> {rx:[],tx:[],last,rec}
+
+function connPush(h, rx, tx, now) {
+  h.rx.push(rx); h.tx.push(tx);
+  if (h.rx.length > CONN_SMOOTH_N) { h.rx.shift(); h.tx.shift(); }
+  h.last = now;
+}
+function connAvg(a) { return a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0; }
+
 async function refreshConnTop() {
   const d = await jget("/api/conn_top");
   if (!d) return;
@@ -945,29 +961,65 @@ async function refreshConnTop() {
     body.innerHTML = `<tr><td colspan="8" class="empty">连接排行暂不可用：${why}</td></tr>`;
     return;
   }
-  if (!(d.top||[]).length && !(d.udp||[]).length) {
+  const now = Date.now();
+  // 1) 新采样并入历史（平滑 + 保留）
+  for (const r of (d.top || [])) {
+    const key = "T|" + r.ip;
+    const h = connHist[key] || {rx: [], tx: [], last: 0, rec: null};
+    connPush(h, r.rx_rate, r.tx_rate, now);
+    h.rec = r;
+    connHist[key] = h;
+  }
+  for (const r of (d.udp || [])) {
+    const key = "U|" + r.ip;
+    const h = connHist[key] || {rx: [], tx: [], last: 0, rec: null};
+    connPush(h, r.rx_rate, r.tx_rate, now);
+    h.rec = r;
+    connHist[key] = h;
+  }
+  // 2) 清理超过保留时间未再出现的连接
+  for (const k in connHist) {
+    if (connHist[k].last && now - connHist[k].last > CONN_KEEP_MS) delete connHist[k];
+  }
+  // 3) 组装行（用平滑速率；类型由 key 前缀决定，后端条目无 type 字段）
+  const rows = [];
+  for (const k in connHist) {
+    const h = connHist[k];
+    if (!h.rec) continue;
+    const r = h.rec;
+    const isUdp = k[0] === "U";
+    const rx = connAvg(h.rx), tx = connAvg(h.tx);
+    const stale = now - h.last > 9000;   // 超过 9 秒无新采样 → 保留中（半透明显示）
+    const procTxt = isUdp ? "UDP（conntrack，无进程名）"
+      : (r.ct ? "TCP（conntrack，无进程名）" : (r.proc || "—") + (r.pid ? " · PID " + r.pid : ""));
+    rows.push({ip: r.ip, region: r.region, iface_lbl: r.iface_lbl, type: isUdp ? "UDP" : "TCP",
+               procTxt, rx, tx, rxr: r.rx, txr: r.tx, conns: r.conns, stale});
+  }
+  rows.sort((a, b) => (b.rx + b.tx) - (a.rx + a.tx));
+  // 4) 固定 TOP N + 其余折叠为汇总行
+  const top = rows.slice(0, CONN_TOP_N);
+  const rest = rows.slice(CONN_TOP_N);
+  if (!top.length) {
     body.innerHTML = `<tr><td colspan="8" class="empty">暂无活动连接（有流量产生时会自动出现）</td></tr>`;
     return;
   }
-  const rows = [];
-  for (const r of (d.top||[])) {
-    rows.push(Object.assign({type:"TCP", procTxt: r.ct ? "TCP（conntrack，无进程名）" : (r.proc||"—")+(r.pid? " · PID "+r.pid : "")}, r));
-  }
-  for (const r of (d.udp||[])) {
-    rows.push(Object.assign({type:"UDP", procTxt:"UDP（conntrack，无进程名）"}, r));
-  }
-  rows.sort((a,b)=>(b.rx_rate+b.tx_rate)-(a.rx_rate+a.tx_rate));
-  body.innerHTML = rows.map(r => `
-    <tr>
+  const html = top.map(r => `
+    <tr${r.stale ? ' class="conn-stale"' : ""}>
       <td style="font-family:Consolas,Menlo,monospace;white-space:nowrap">${r.ip}<div style="color:var(--muted);font-size:11px;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif">${r.region ? r.region : "内网 / 未知"}${r.iface_lbl ? " · 经 " + r.iface_lbl : ""}</div></td>
-      <td><span class="pill ${r.type==='TCP'?'ok':''}">${r.type}</span></td>
+      <td><span class="pill ${r.type === 'TCP' ? 'ok' : ''}">${r.type}</span></td>
       <td style="max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.procTxt}</td>
-      <td class="rx-c">${fmtBps(r.rx_rate)}</td>
-      <td class="tx-c">${fmtBps(r.tx_rate)}</td>
-      <td>${fmtBytes(r.rx)}</td>
-      <td>${fmtBytes(r.tx)}</td>
+      <td class="rx-c">${fmtBps(r.rx)}</td>
+      <td class="tx-c">${fmtBps(r.tx)}</td>
+      <td>${fmtBytes(r.rxr)}</td>
+      <td>${fmtBytes(r.txr)}</td>
       <td>${r.conns}</td>
     </tr>`).join("");
+  if (rest.length) {
+    const rxSum = rest.reduce((s, x) => s + x.rx, 0);
+    const txSum = rest.reduce((s, x) => s + x.tx, 0);
+    html += `<tr class="conn-more"><td colspan="8">还有 ${rest.length} 条 · 合计 ▼ ${fmtBps(rxSum)} ▲ ${fmtBps(txSum)}</td></tr>`;
+  }
+  body.innerHTML = html;
 }
 
 // 设置弹窗
