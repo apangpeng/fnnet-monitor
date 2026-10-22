@@ -47,7 +47,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.25"
+VERSION = "1.3.26"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -286,6 +286,7 @@ def collect_routes_map():
         return _routes_cache["routes"]
     routes = []
     for cmd in (["ip", "route", "show"], ["ip", "-6", "route", "show"]):
+        is6 = "-6" in cmd
         out, _ = run_cmd(cmd, timeout=4)
         for line in out.splitlines():
             p = line.split()
@@ -294,7 +295,8 @@ def collect_routes_map():
             if p[0] in ("unreachable", "blackhole", "prohibit", "throw", "local"):
                 continue
             if p[0] == "default":
-                dest, plen = "0.0.0.0", 0
+                # IPv6 默认路由必须存成 ::/0（IPv4 才是 0.0.0.0/0），否则 IPv6 地址匹配不到
+                dest, plen = ("::", 0) if is6 else ("0.0.0.0", 0)
                 rest = p[1:]
             elif p[0] == "fe80" or p[0] == "ff00" or "/" in p[0] or ":" not in p[0]:
                 # IPv4 或带前缀的 IPv6：dest 在第一列；"fe80::/64" 也可能带 "/"
