@@ -47,7 +47,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.26"
+VERSION = "1.3.27"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -325,6 +325,9 @@ def route_iface(ip):
     try:
         addr = ipaddress.ip_address(ip)
     except Exception:
+        return ""
+    # 回环地址（127.0.0.0/8、::1、::ffff:127.x）是本机自连，不标注出口网卡
+    if addr.is_loopback:
         return ""
     best = None
     for dest, plen, iface in collect_routes_map():
