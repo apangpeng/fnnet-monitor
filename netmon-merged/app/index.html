@@ -693,7 +693,7 @@ function renderNet(d) {
   $("gw").textContent = (d.routes && d.routes.gateway) || "--";
 
   // 物理网卡卡片
-  const cards = $("iface-cards");
+  const cards = $("panel-iface-cards");
   cards.innerHTML = "";
   for (const it of d.ifaces) {
     if (it.virtual) continue;
