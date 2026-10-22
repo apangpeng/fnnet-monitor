@@ -9,7 +9,7 @@ import os
 import tarfile
 
 ROOT = r"C:\Users\Administrator\Downloads\new-chat-4\new-chat-4\netmon-merged"
-OUT = r"C:\Users\Administrator\Downloads\new-chat-4\new-chat-4\网络监控-1.3.23-内置下行带宽消耗器.fpk"
+OUT = r"C:\Users\Administrator\Downloads\new-chat-4\new-chat-4\网络监控-1.3.24-内置下行带宽消耗器.fpk"
 
 
 def add_tree(tf, src_dir, arc_prefix=""):
