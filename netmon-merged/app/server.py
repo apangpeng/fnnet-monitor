@@ -47,7 +47,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.32"
+VERSION = "1.3.33"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
