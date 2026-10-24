@@ -11,6 +11,7 @@ import urllib.request
 
 BASE = "http://127.0.0.1:8899"
 TOKEN = "testtoken123"
+NEWTOKEN = "newtoken4567"
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smoke-data")
 
 passed = []
@@ -74,19 +75,45 @@ def main():
             print(server.stdout.read(2000))
             return 1
 
-        check("version", st == 200 and j.get("version") == "1.3.33", str(j.get("version")))
+        check("version", st == 200 and j.get("version") == "1.3.41", str(j.get("version")))
 
-        # DC: 未设口令 → setup 流程
-        st, j = req("GET", "/api/dc/status")
-        check("dc status setup flag", st == 200 and j.get("setup") is True and j.get("auth") is False, str(j))
+        # 统一口令：未设置前数据接口放行
+        st, j = req("GET", "/api/auth/status")
+        check("auth status setup flag", st == 200 and j.get("setup") is False, str(j))
+        st, j = req("GET", "/api/net")
+        check("api net open before setup", st == 200, str(j.get("realtime") if j else j))
 
-        # DC: 设置口令
-        st, j = req("POST", "/api/dc/setup", {"token": TOKEN})
-        check("dc setup token", st == 200 and j.get("ok") is True, str(j))
+        # 统一口令：首次设置
+        st, j = req("POST", "/api/auth/setup", {"token": TOKEN})
+        check("auth setup token", st == 200 and j.get("ok") is True, str(j))
+        st, j = req("GET", "/api/auth/status")
+        check("auth status setup true", st == 200 and j.get("setup") is True, str(j))
 
-        # DC: 无口令 → 401
+        # 设置后：无口令一律 401（含只读接口 / 写接口）
+        st, j = req("GET", "/api/net", expect401=True)
+        check("api net 401 without token", st == 401, str(j))
+        st, j = req("GET", "/api/traffic", expect401=True)
+        check("api traffic 401 without token", st == 401, str(j))
+        st, j = req("GET", "/api/ports", expect401=True)
+        check("api ports 401 without token", st == 401, str(j))
+        st, j = req("POST", "/api/config", {"upstream_mbps": 100}, expect401=True)
+        check("api config 401 without token", st == 401, str(j))
+        st, j = req("POST", "/api/reset_traffic", expect401=True)
+        check("api reset 401 without token", st == 401, str(j))
         st, j = req("GET", "/api/dc/status", expect401=True)
-        check("dc status 401 without token", st == 401 and j.get("auth") is False, str(j))
+        check("dc status 401 without token", st == 401, str(j))
+        st, j = req("GET", "/api/info", expect401=True)
+        check("api info 401 without token", st == 401, str(j))
+
+        # 带正确口令：全部放行
+        st, j = req("GET", "/api/net", token=TOKEN)
+        check("api net authed", st == 200 and "ifaces" in j, "ifaces=%d" % len(j.get("ifaces", [])))
+        st, j = req("GET", "/api/info", token=TOKEN)
+        check("api info authed", st == 200 and j.get("version") == "1.3.41", str(j.get("version")))
+        st, j = req("POST", "/api/config", {"upstream_mbps": 100}, token=TOKEN)
+        check("api config authed", st == 200 and j.get("ok") is True, str(j))
+        st, j = req("POST", "/api/reset_traffic", token=TOKEN)
+        check("api reset authed", st == 200 and j.get("ok") is True, str(j))
 
         # DC: 带口令 status
         st, j = req("GET", "/api/dc/status", token=TOKEN)
@@ -173,14 +200,14 @@ def main():
         st, j = req("GET", "/api/dc/status", token="newtoken4567")
         check("dc new token works", st == 200 and j.get("auth") is True, str(j))
 
-        # 主监控 API
-        st, j = req("GET", "/api/net")
+        # 主监控 API（统一口令下均需带 token；口令已改为 newtoken4567）
+        st, j = req("GET", "/api/net", token=NEWTOKEN)
         check("api net", st == 200 and isinstance(j.get("ifaces"), list), str(st))
-        st, j = req("GET", "/api/traffic")
+        st, j = req("GET", "/api/traffic", token=NEWTOKEN)
         check("api traffic", st == 200 and "today" in j and "pcdn" in j, str(st))
-        st, j = req("GET", "/api/history?range=1h")
+        st, j = req("GET", "/api/history?range=1h", token=NEWTOKEN)
         check("api history", st == 200 and "rx" in j, str(st))
-        st, j = req("GET", "/api/ports")
+        st, j = req("GET", "/api/ports", token=NEWTOKEN)
         check("api ports", st == 200, str(st))
         # 端口条目带用途分组与说明
         pl = j.get("listeners") or []
@@ -188,7 +215,7 @@ def main():
               len(pl) == 0 or all(("group" in p and "desc" in p) for p in pl),
               "listeners=%d" % len(pl))
         # 连接流量排行（v1.3.16+）：结构存在，非 Linux 下 available=False 且 top/udp 为列表
-        st, j = req("GET", "/api/conn_top")
+        st, j = req("GET", "/api/conn_top", token=NEWTOKEN)
         check("api conn_top", st == 200 and "available" in j and "top" in j and "udp" in j
               and isinstance(j.get("top"), list) and isinstance(j.get("udp"), list), str(st))
         check("conn_top structure", j.get("available") is False and j.get("top") == [] and j.get("udp") == []
@@ -206,6 +233,19 @@ def main():
             check("index read", False, str(e))
 
         # 双栈监听降级日志路径不报错
+        # 检查更新接口（结构存在；外网通不通都接受，只验证响应结构与当前版本）
+        st, j = req("GET", "/api/update/check", token=NEWTOKEN)
+        check("api update/check", st == 200 and "current" in j and j.get("current") == "1.3.41",
+              "ok=%s current=%s has_update=%s" % (j.get("ok"), j.get("current"), j.get("has_update")))
+
+        # 爆破防护：连续 5 次错误口令 → 锁定 15 分钟，锁定期内正确口令也拒绝
+        locked = False
+        for i in range(5):
+            st, j = req("GET", "/api/info", token="wrong-pass-%d" % i, expect401=True)
+        st, j = req("GET", "/api/info", token="wrong-pass-last", expect401=True)
+        st, j = req("GET", "/api/info", token=NEWTOKEN, expect401=True)
+        check("auth brute-force lock", st == 401, "锁定期内正确口令也被拒绝 status=%d" % st)
+
         print("---- summary ----")
         print("passed=%d failed=%d" % (len(passed), len(failed)))
         if failed:
