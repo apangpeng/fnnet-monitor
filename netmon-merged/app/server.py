@@ -47,11 +47,19 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.33"
+VERSION = "1.3.41"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
                  "vxlan", "wg", "lxc", "kube", "zt", "tailscale", "ipsec")
+
+
+def growth_sum(pts):
+    """逐对累加增长量：只累计单调递增部分。
+    机器重启后 /proc/net/dev 计数器归零（采样值回退），首尾差值会变负；
+    逐对 max(0, v[i]-v[i-1]) 自动跳过回退段，重启后的增长仍正确计入。"""
+    pts = sorted(pts)
+    return sum(max(0.0, pts[i][1] - pts[i - 1][1]) for i in range(1, len(pts)))
 
 # ---------------------------------------------------------------------------
 # 基础工具
@@ -657,7 +665,7 @@ def ss_listeners():
             except Exception:
                 continue
             pname, pid = "", ""
-            m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', proc)
+            m = re.search(r'users:\(\\("([^"]+)",pid=(\d+)', proc)
             if m:
                 pname, pid = m.group(1), m.group(2)
             if port in PORT_DESC:
@@ -751,7 +759,7 @@ def parse_ss_conn_top():
             continue
         if cur is None:
             continue
-        m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', s)
+        m = re.search(r'users:\(\\("([^"]+)",pid=(\d+)', s)
         if m:
             cur["proc"] = m.group(1)
             cur["pid"] = int(m.group(2))
@@ -1122,7 +1130,9 @@ class Collector:
         self._prev_snmp = None
         self._last_hist_ts = 0
         self._last_cleanup_ts = 0
+        self._last_log_check_ts = 0
         self._last_vnet_ts = 0
+        self._today_ctx = {"rx": {}, "tx": {}}   # 各网卡今日累计缓存（每 history_interval 刷新）
         self._conn_prev = {}          # (kind, ...) -> (ts, rx, tx)，连接排行速率采样
         self.vnet_map = {}
         self.conn_top = {"available": False, "top": [], "udp": [], "ts": 0,
@@ -1136,6 +1146,25 @@ class Collector:
 
     def reload_config(self):
         self.config = load_config(self.data_dir)
+
+    def _ensure_log_size(self, max_bytes=5 * 1024 * 1024):
+        """server.log 超限即截断（截断式）：清空文件并重绑 stdout/stderr 偏移。
+        用 O_APPEND 重新打开后 dup2 到 1/2，后续写入自动落到文件尾部，不留空洞。"""
+        try:
+            log = os.path.join(self.data_dir, "server.log")
+            if not os.path.exists(log) or os.path.getsize(log) <= max_bytes:
+                return
+            fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            os.ftruncate(fd, 0)
+            os.dup2(fd, 1)
+            os.dup2(fd, 2)
+            os.close(fd)
+            try:
+                sys.stderr.write("[netmon] server.log 超过 5MB，已自动截断\n")
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def stop(self):
         self._stop.set()
@@ -1188,8 +1217,11 @@ class Collector:
             self._last_vnet_ts = now
             self.vnet_map = detect_vms()
         aliases = self.config.get("aliases", {})
+        today = self._today_ctx
         for it in ifaces:
             n = it["iface"]
+            it["today_rx"] = round(today.get("rx", {}).get(n, 0.0))
+            it["today_tx"] = round(today.get("tx", {}).get(n, 0.0))
             # 显示名：用户别名 > 虚拟机名 > 网卡名
             if n in aliases:
                 it["label"] = aliases[n]
@@ -1239,10 +1271,29 @@ class Collector:
                 rows.append((now, "tcp_retrans", float(tcp.get("RetransSegs", 0))))
             self.db.write(rows)
 
+            # 顺带刷新「今日累计」缓存：对每张网卡（含虚拟）取今天 00:00 起的采样算增长量
+            import datetime as _dt
+            d = _dt.datetime.now()
+            day0 = _dt.datetime(d.year, d.month, d.day).timestamp()
+            secs = now - day0
+            ctx = {"rx": {}, "tx": {}}
+            for prefix, key in (("rx_bytes:", "rx"), ("tx_bytes:", "tx")):
+                for ts, metric, v in self.db.query_prefix(prefix, secs):
+                    ctx[key].setdefault(metric.split(":", 1)[1], []).append((ts, v))
+            for key in ("rx", "tx"):
+                for iface, pts in ctx[key].items():
+                    ctx[key][iface] = growth_sum(pts)
+            self._today_ctx = ctx
+
         # 清理（每小时一次）
         if now - self._last_cleanup_ts > 3600:
             self._last_cleanup_ts = now
             self.db.cleanup(self.retention_days)
+
+        # server.log 截断检查（每 5 分钟）：超过 5MB 清空重写，防止日志无限膨胀
+        if now - self._last_log_check_ts > 300:
+            self._last_log_check_ts = now
+            self._ensure_log_size()
 
         self._prev_dev = cur
         self._prev_ts = now
@@ -1374,14 +1425,144 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # ---------- 统一访问口令（整个页面 + 全部 /api/ 共用，含爆破防护） ----------
+    def _auth_token(self):
+        """取请求携带的口令：X-Auth-Token > Authorization: Bearer > ?token="""
+        got = self.headers.get("X-Auth-Token") or ""
+        if not got:
+            au = self.headers.get("Authorization") or ""
+            if au.startswith("Bearer "):
+                got = au[7:]
+        if not got:
+            q = urlparse(self.path).query
+            if q:
+                got = (parse_qs(q).get("token") or [""])[0]
+        return got.strip()
+
+    def _auth_fail(self, ip, reason="口令校验失败"):
+        """失败计数与锁定：连续 5 次失败锁定 15 分钟，再失败翻倍（15→30→60…）。"""
+        fails = self.server.auth_fails.setdefault(ip, {"fails": 0, "lock_until": 0.0})
+        now = time.time()
+        if now < fails["lock_until"]:
+            return True  # 仍在锁定期
+        if reason == "口令校验失败":
+            fails["fails"] += 1
+            sys.stderr.write("[auth] %s IP=%s 连续失败 %d 次\n" % (reason, ip, fails["fails"]))
+            if fails["fails"] >= 5:
+                level = fails["fails"] // 5 - 1
+                if level > 3:
+                    level = 3
+                lock_min = 15 * (2 ** level)
+                fails["lock_until"] = now + lock_min * 60
+                sys.stderr.write("[auth] IP=%s 触发锁定 %d 分钟\n" % (ip, lock_min))
+        return False
+
+    def _auth_ok(self):
+        """统一口令校验：成功清零失败计数；失败记日志并按 IP 锁定。"""
+        tok = dc_read_token(self.server.collector.data_dir)
+        if not tok:
+            # 尚未设置口令：数据接口也开放（首次设置前无数据可保）
+            return True
+        got = self._auth_token()
+        ip = self.client_address[0] if self.client_address else "?"
+        if self.server.auth_fails.get(ip, {}).get("lock_until", 0) > time.time():
+            return False  # 锁定期：直接拒绝，不参与校验
+        if not got:
+            return False  # 未携带口令：不计数（避免误锁），直接拒绝
+        if hmac.compare_digest(got.encode("utf-8"), tok.encode("utf-8")):
+            self.server.auth_fails.pop(ip, None)
+            return True
+        self._auth_fail(ip)
+        return False
+
+    def _auth_deny(self):
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write('{"ok": false, "error": "需要访问口令"}'.encode("utf-8"))
+
+    @staticmethod
+    def _auth_unprotected(path):
+        """不需要口令的路径：页面壳 + 口令本身的查询/设置。"""
+        if path in ("/", "/index.html"):
+            return True
+        return path in ("/api/auth/status", "/api/auth/setup")
+
+    # ---------- 检查更新（GitHub Release） ----------
+    @staticmethod
+    def _version_tuple(v):
+        t = []
+        for p in str(v or "").lstrip("vV").split("."):
+            try:
+                t.append(int(p))
+            except (ValueError, TypeError):
+                break
+        return tuple(t)
+
+    @staticmethod
+    def _gh_latest():
+        """读 GitHub 仓库 manifest 拿最新版本（raw 静态内容，避开 API 限流 403）。"""
+        import urllib.request as _ur
+        import re as _re
+        urls = [
+            "https://raw.githubusercontent.com/apangpeng/fnnet-monitor/main/netmon-merged/manifest",
+            "https://raw.githubusercontent.com/apangpeng/fnnet-monitor/main/manifest",
+            "https://ghfast.top/https://raw.githubusercontent.com/apangpeng/fnnet-monitor/main/netmon-merged/manifest",
+        ]
+        last_err = ""
+        for url in urls:
+            try:
+                rq = _ur.Request(url, headers={"User-Agent": "netmon-update-check"})
+                with _ur.urlopen(rq, timeout=8) as r:
+                    txt = r.read().decode("utf-8", "replace")
+                m = _re.search(r"^\s*version\s*=\s*([0-9]+\.[0-9]+\.[0-9]+)", txt, _re.M)
+                if not m:
+                    raise ValueError("manifest 无版本号")
+                tag = "v" + m.group(1)
+                cm = _re.search(r"^\s*changelog\s*=\s*(.*)$", txt, _re.M)
+                notes = (cm.group(1) or "").replace("<br>", "\n")[:600] if cm else ""
+                return tag, notes, "https://github.com/apangpeng/fnnet-monitor/releases"
+            except Exception as e:
+                last_err = str(e)
+        raise RuntimeError(last_err or "未知网络错误")
+
+    def _check_update(self):
+        cur = self._version_tuple(VERSION)
+        try:
+            tag, notes, url = self._gh_latest()
+            latest = self._version_tuple(tag)
+            behind = bool(latest) and latest < cur
+            return {"ok": True,
+                    "current": VERSION,
+                    "latest": tag.lstrip("vV"),
+                    "has_update": bool(latest) and latest > cur,
+                    "behind": behind,
+                    "notes": notes,
+                    "release_url": url}
+        except Exception as e:
+            return {"ok": False,
+                    "error": "网络不通，无法检查更新：" + str(e)[:150],
+                    "current": VERSION}
+
     def do_GET(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
         path = u.path
 
+        if not self._auth_unprotected(path) and not self._auth_ok():
+            return self._auth_deny()
+
         if path in ("/", "/index.html"):
             return self._send_file(os.path.join(STATIC_DIR, "index.html"),
                                    "text/html; charset=utf-8")
+
+        if path == "/api/auth/status":
+            return self._send_json({"ok": True,
+                                    "setup": bool(dc_read_token(self.server.collector.data_dir))})
+
+        if path == "/api/update/check":
+            return self._send_json(self._check_update())
 
         if path == "/api/net":
             s = self.server.collector.snapshot
@@ -1430,6 +1611,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if not self._auth_unprotected(u.path) and not self._auth_ok():
+            return self._auth_deny()
+        if u.path == "/api/auth/setup":
+            # 统一访问口令：首次设置；已设置后需带旧口令（同一 token 文件，与消耗器共用）
+            try:
+                data = json.loads(self._dc_body())
+                nt = str(data.get('token') or '').strip()
+                if len(nt) < 8:
+                    return self._send_json({"ok": False, "error": "访问口令至少需要 8 位"})
+                data_dir = self.server.collector.data_dir
+                cur = dc_read_token(data_dir)
+                if cur and not self._auth_ok():
+                    return self._auth_deny()
+                dc_write_token(data_dir, nt)
+                return self._send_json({"ok": True})
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)})
         if u.path.startswith("/api/dc/"):
             return self._dc_post(u.path)
         if u.path == "/api/config":
@@ -1480,17 +1678,16 @@ class Handler(BaseHTTPRequestHandler):
                 if n == "lo":
                     return False
                 return not n.startswith(VIRT_PREFIXES)
+
             rx = tx = 0
             for iface, pts in rx_by_if.items():
                 if not _is_physical(iface):
                     continue
-                pts.sort()
-                rx += max(0, pts[-1][1] - pts[0][1])
+                rx += growth_sum(pts)
             for iface, pts in tx_by_if.items():
                 if not _is_physical(iface):
                     continue
-                pts.sort()
-                tx += max(0, pts[-1][1] - pts[0][1])
+                tx += growth_sum(pts)
             return rx, tx
 
         today_rx, today_tx = period_totals(now - today_start)
@@ -2145,6 +2342,7 @@ def main():
         else:
             httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.collector = collector
+    httpd.auth_fails = {}   # ip -> {fails, lock_until}，统一口令爆破防护
     print("netmon %s listening on http://%s:%d  (data=%s)" %
           (VERSION, listen_desc, args.port, args.data_dir))
     try:
