@@ -417,16 +417,23 @@
   <input type="number" id="dc-check" min="0" max="1440" placeholder="5">
   <label class="lbl">下载方式：不落盘（固定）</label>
   <div class="desc" style="margin-top:6px">不落盘：数据直接丢弃，仅统计流量，不写盘不磨损硬盘。本应用固定为不落盘运行。</div>
+  <label class="lbl">下载源方式：</label>
+  <div class="seg" id="dc-order" style="margin-bottom:6px">
+    <button type="button" data-v="random" onclick="dcSetOrder('random', this)">随机</button>
+    <button type="button" data-v="sequential" onclick="dcSetOrder('sequential', this)">顺序</button>
+  </div>
+  <div class="desc" style="margin-top:2px">随机：每轮从源池随机抽 4 个（2 测速 + 2 镜像），来源不固定、防限速；顺序：按列表每轮取 4 个轮询推进，所有源都能轮上。</div>
   <div class="row">
     <button class="btn accent" onclick="dcSaveConfig()">保存参数</button>
     <span class="msg" id="dc-cfg-msg"></span>
   </div>
 
   <h2 style="margin-top:16px"><span class="dot"></span>下载源（urls.txt）</h2>
-  <div class="desc">每行一个链接，<b style="color:var(--text)">#</b> 开头为注释。默认源均为公开合法大文件（测速文件 / 开源镜像）。<b style="color:var(--accent)">未手动编辑时，每次下载自动从内置源池随机轮换（2 个测速文件 + 2 个镜像，每天不同）</b>；保存过自己的列表后以你的为准。</div>
+  <div class="desc">每行一个链接，<b style="color:var(--text)">#</b> 开头为注释。默认源均为公开合法大文件（测速文件 / 开源镜像）。<b style="color:var(--accent)">随机</b>：每轮从源池随机抽 4 个（2 测速 + 2 镜像），来源不固定；<b style="color:var(--accent)">顺序</b>：按列表顺序每轮取 4 个轮询推进；手动添加的源同样参与随机/顺序。</div>
   <textarea id="dc-urls" spellcheck="false"></textarea>
   <div class="row">
     <button class="btn accent" onclick="dcSaveUrls()">保存下载源</button>
+    <button class="btn ghost" onclick="dcResetUrls()">恢复默认源</button>
     <span class="msg" id="dc-url-msg"></span>
   </div>
 
@@ -1276,6 +1283,14 @@ async function dcLoadUrls(){
     if (data.ok) $('dc-urls').value = data.urls;
   } catch(e) {}
 }
+function dcSetOrder(v, el){
+  document.querySelectorAll('#dc-order button').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+}
+function dcOrderVal(){
+  const a = document.querySelector('#dc-order button.active');
+  return a ? a.dataset.v : 'random';
+}
 async function dcSaveConfig(){
   const speed = parseInt($('dc-speed').value, 10);
   const daily = parseInt($('dc-daily').value, 10);
@@ -1296,13 +1311,19 @@ async function dcSaveConfig(){
       return;
     }
   }
-  const r = await dcJpost('/api/dc/config', { speed_mbps: speed, daily_gb: daily, check_minutes: check });
+  const r = await dcJpost('/api/dc/config', { speed_mbps: speed, daily_gb: daily, check_minutes: check, order: dcOrderVal() });
   dcShowMsg('dc-cfg-msg', r.ok, r.ok ? '参数已保存，下一轮生效' : (r.error || '保存失败'));
   dcLoadStatus();
 }
 async function dcSaveUrls(){
   const r = await dcJpost('/api/dc/urls', { urls: $('dc-urls').value });
   dcShowMsg('dc-url-msg', r.ok, r.ok ? '下载源已保存' : (r.error || '保存失败'));
+}
+async function dcResetUrls(){
+  if (!confirm('确定恢复为内置默认下载源吗？当前自定义列表将被覆盖。')) return;
+  const r = await dcJpost('/api/dc/urls/reset', {});
+  dcShowMsg('dc-url-msg', r.ok, r.ok ? '已恢复为内置默认源' : (r.error || '恢复失败'));
+  if (r.ok) dcLoadUrls();
 }
 async function dcAct(a){
   const r = await dcJpost('/api/dc/action', { action: a });
@@ -1355,6 +1376,8 @@ async function dcStartApp(){
     $('dc-speed').value = data.speed_mbps;
     $('dc-daily').value = data.daily_gb;
     $('dc-check').value = data.check_minutes;
+    const ov = data.order === 'sequential' ? 'sequential' : 'random';
+    document.querySelectorAll('#dc-order button').forEach(b => b.classList.toggle('active', b.dataset.v === ov));
   }
   setInterval(dcLoadStatus, 4000);
 }
