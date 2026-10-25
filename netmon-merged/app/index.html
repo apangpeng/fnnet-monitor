@@ -1187,7 +1187,15 @@ const BLOCKS = [
   {id:"panel-docker", name:"Docker 容器流量"},
 ];
 function blockHidden(){
-  try { return JSON.parse(localStorage.getItem("netmon_hidden") || "[]"); } catch(e) { return []; }
+  try {
+    const raw = localStorage.getItem("netmon_hidden");
+    if (raw === null) return defaultHidden();  // 首次访问（新装）：默认隐藏 PCDN 相关板块
+    return JSON.parse(raw) || [];
+  } catch(e) { return []; }
+}
+function defaultHidden(){
+  // 新装用户默认隐藏：下行带宽消耗器、PCDN 业务总览（非 PCDN 用户界面更干净；需要时去「板块显示」勾上即可恢复）
+  return ["panel-dc", "panel-pcdn"];
 }
 function applyBlocks(){
   const h = blockHidden();
@@ -1219,7 +1227,7 @@ function buildBlockSettings(){
     l.style.cssText = "display:flex;align-items:center;gap:6px;color:var(--text);font-size:13px;cursor:pointer;padding:3px 0";
     const cb = document.createElement("input");
     cb.type = "checkbox"; cb.id = "cb-" + b.id;
-    cb.checked = true;
+    cb.checked = !blockHidden().includes(b.id);  // 按真实显示状态渲染
     cb.addEventListener("change", () => toggleBlock(b.id, cb.checked));
     l.appendChild(cb);
     l.appendChild(document.createTextNode(b.name));
