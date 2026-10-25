@@ -665,7 +665,7 @@ def ss_listeners():
             except Exception:
                 continue
             pname, pid = "", ""
-            m = re.search(r'users:\\\(("([^"]+)",pid=(\d+)', proc)
+            m = re.search(r'users:\(("([^"]+)",pid=(\d+)', proc)
             if m:
                 pname, pid = m.group(1), m.group(2)
             if port in PORT_DESC:
@@ -759,7 +759,7 @@ def parse_ss_conn_top():
             continue
         if cur is None:
             continue
-        m = re.search(r'users:\\\(("([^"]+)",pid=(\d+)', s)
+        m = re.search(r'users:\(("([^"]+)",pid=(\d+)', s)
         if m:
             cur["proc"] = m.group(1)
             cur["pid"] = int(m.group(2))
