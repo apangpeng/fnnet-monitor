@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+"#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 netmon - 飞牛 NAS / Linux 专用网络监控面板（网络监控为主界面）
@@ -47,7 +47,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.41"
+VERSION = "1.3.43"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -665,7 +665,7 @@ def ss_listeners():
             except Exception:
                 continue
             pname, pid = "", ""
-            m = re.search(r'users:\(("([^"]+)",pid=(\d+)', proc)
+            m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', proc)
             if m:
                 pname, pid = m.group(1), m.group(2)
             if port in PORT_DESC:
@@ -759,7 +759,7 @@ def parse_ss_conn_top():
             continue
         if cur is None:
             continue
-        m = re.search(r'users:\(("([^"]+)",pid=(\d+)', s)
+        m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', s)
         if m:
             cur["proc"] = m.group(1)
             cur["pid"] = int(m.group(2))
@@ -1359,6 +1359,7 @@ class Collector:
                 iface_lbl = aliases.get(iface) or vnet_map.get(iface) or iface
                 out_udp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1),
                                     region=ip_region(e["ip"]),
+                                    proc=friendly_proc(e.get("proc", "")),
                                     iface=iface, iface_lbl=iface_lbl))
             # 更新采样基准（限制规模，防连接频繁变动导致内存膨胀）
             new_prev = {}
@@ -1791,7 +1792,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": True, "speed_mbps": cfg['speed'],
                                     "daily_gb": cfg['daily_gb'],
                                     "check_minutes": cfg['check_minutes'],
-                                    "download_mode": cfg['mode']})
+                                    "download_mode": cfg['mode'],
+                                    "order": cfg['order']})
         if path == "/api/dc/urls":
             if not self._dc_authed():
                 return self._dc_deny()
@@ -1855,9 +1857,16 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('达成后复查间隔需填 0~1440 分钟（0=达成后彻底暂停等明天）')
                     if not (0 <= cm <= 1440):
                         raise ValueError('达成后复查间隔需填 0~1440 分钟（0=达成后彻底暂停等明天）')
+                order = data.get('order')
+                if order is None:
+                    order = dc_read_cfg(data_dir)['order']  # 兼容旧前端：不传则保留原值
+                else:
+                    order = str(order).strip().lower()
+                    if order not in ('random', 'sequential'):
+                        raise ValueError('下载源方式只能选「随机」或「顺序」')
                 with open(dc_paths(data_dir)["config"], 'w', encoding='utf-8') as f:
-                    f.write('SPEED_MBPS=%d\nDAILY_GB=%d\nCHECK_MINUTES=%d\nDOWNLOAD_MODE=%s\n' % (speed, daily, cm, mode))
-                dc_log(data_dir, '配置已更新：限速 %d MB/s（0=不限速），每日目标 %d GB（0=不限流量），达成后每 %d 分钟复查（0=达成后暂停等明天），下载方式不落盘' % (speed, daily, cm))
+                    f.write('SPEED_MBPS=%d\nDAILY_GB=%d\nCHECK_MINUTES=%d\nDOWNLOAD_MODE=%s\nDOWNLOAD_ORDER=%s\n' % (speed, daily, cm, mode, order))
+                dc_log(data_dir, '配置已更新：限速 %d MB/s（0=不限速），每日目标 %d GB（0=不限流量），达成后每 %d 分钟复查（0=达成后暂停等明天），下载方式不落盘，下载源方式%s' % (speed, daily, cm, '随机' if order == 'random' else '顺序'))
                 return self._send_json({"ok": True})
             except Exception as e:
                 return self._send_json({"ok": False, "error": '参数不合法：%s' % e})
@@ -1872,6 +1881,15 @@ class Handler(BaseHTTPRequestHandler):
                 count = len([x for x in str(raw).splitlines() if x.strip() and not x.strip().startswith('#')])
                 dc_log(data_dir, '下载源已更新（%d 条有效链接）' % count)
                 return self._send_json({"ok": True})
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)})
+        if path == "/api/dc/urls/reset":
+            # 恢复内置默认源：直接覆盖 urls.txt 为当前版本的全量默认池
+            try:
+                with open(dc_paths(data_dir)["urls"], 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(DC_DEFAULT_URLS) + '\n')
+                dc_log(data_dir, '下载源已恢复为内置默认（%d 条）' % len(DC_DEFAULT_URLS))
+                return self._send_json({"ok": True, "count": len(DC_DEFAULT_URLS)})
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)})
         if path == "/api/dc/action":
@@ -1897,18 +1915,25 @@ class Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 DC_DEFAULT_URLS = [
-    # Ubuntu 24.04.5.1 desktop ISO（约 6.5GB）—— 5 个镜像站
+    # Ubuntu 24.04.5.1 desktop ISO（约 6.5GB）—— 8 个镜像站
     'https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
     'https://mirrors.ustc.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
     'https://mirrors.huaweicloud.com/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
     'https://mirror.sjtu.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
     'https://mirror.nju.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
-    # Debian 13.7.0 DVD-1（约 4GB）—— 3 个镜像站
+    'https://mirrors.163.com/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
+    'https://mirrors.zju.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
+    'https://mirrors.hust.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
+    'https://mirror.lzu.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
+    # Debian 13.7.0 DVD-1（约 4GB）—— 4 个镜像站 + netinst 小文件
     'https://mirrors.tuna.tsinghua.edu.cn/debian-cd/current/amd64/iso-dvd/debian-13.7.0-amd64-DVD-1.iso',
     'https://mirror.sjtu.edu.cn/debian-cd/current/amd64/iso-dvd/debian-13.7.0-amd64-DVD-1.iso',
     'https://mirror.nju.edu.cn/debian-cd/current/amd64/iso-dvd/debian-13.7.0-amd64-DVD-1.iso',
-    # openSUSE Tumbleweed DVD（约 5GB）
+    'https://mirrors.163.com/debian-cd/current/amd64/iso-dvd/debian-13.7.0-amd64-DVD-1.iso',
+    'https://mirrors.tuna.tsinghua.edu.cn/debian-cd/current/amd64/iso-cd/debian-13.7.0-amd64-netinst.iso',
+    # openSUSE Tumbleweed DVD（约 5GB）+ Leap 15.6 DVD（约 5GB）
     'https://mirrors.tuna.tsinghua.edu.cn/opensuse/tumbleweed/iso/openSUSE-Tumbleweed-DVD-x86_64-Current.iso',
+    'https://mirrors.tuna.tsinghua.edu.cn/opensuse/distribution/leap/15.6/iso/openSUSE-Leap-15.6-DVD-x86_64-Media.iso',
     # Arch Linux 最新 ISO（约 1.6GB）—— 4 个镜像站
     'https://mirrors.tuna.tsinghua.edu.cn/archlinux/iso/latest/archlinux-x86_64.iso',
     'https://mirrors.ustc.edu.cn/archlinux/iso/latest/archlinux-x86_64.iso',
@@ -1918,20 +1943,63 @@ DC_DEFAULT_URLS = [
     'https://proof.ovh.net/files/10Gb.dat',
     'https://proof.ovh.net/files/1Gb.dat',
     'https://proof.ovh.net/files/100Mb.dat',
-    # Hetzner / Tele2 官方测速文件
+    # Hetzner（欧洲 + 美国区）/ Tele2 官方测速文件
+    'https://speed.hetzner.de/1GB.bin',
+    'https://speed.hetzner.de/100MB.bin',
+    'https://ash-speed.hetzner.com/100MB.bin',
+    'https://speedtest.tele2.net/1GB.zip',
+    'https://speedtest.tele2.net/100MB.zip',
+]
+
+# 上一版本（v1.3.41 及更早）的内置默认池：升级后 urls.txt 仍等于旧池时，
+# 自动视为"未自定义"，改用新版全量池（含新增源）
+DC_LEGACY_URLS = [
+    'https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
+    'https://mirrors.ustc.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
+    'https://mirrors.huaweicloud.com/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
+    'https://mirror.sjtu.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
+    'https://mirror.nju.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.5.1-desktop-amd64.iso',
+    'https://mirrors.tuna.tsinghua.edu.cn/debian-cd/current/amd64/iso-dvd/debian-13.7.0-amd64-DVD-1.iso',
+    'https://mirror.sjtu.edu.cn/debian-cd/current/amd64/iso-dvd/debian-13.7.0-amd64-DVD-1.iso',
+    'https://mirror.nju.edu.cn/debian-cd/current/amd64/iso-dvd/debian-13.7.0-amd64-DVD-1.iso',
+    'https://mirrors.tuna.tsinghua.edu.cn/opensuse/tumbleweed/iso/openSUSE-Tumbleweed-DVD-x86_64-Current.iso',
+    'https://mirrors.tuna.tsinghua.edu.cn/archlinux/iso/latest/archlinux-x86_64.iso',
+    'https://mirrors.ustc.edu.cn/archlinux/iso/latest/archlinux-x86_64.iso',
+    'https://mirrors.huaweicloud.com/archlinux/iso/latest/archlinux-x86_64.iso',
+    'https://mirror.sjtu.edu.cn/archlinux/iso/latest/archlinux-x86_64.iso',
+    'https://proof.ovh.net/files/10Gb.dat',
+    'https://proof.ovh.net/files/1Gb.dat',
+    'https://proof.ovh.net/files/100Mb.dat',
     'https://speed.hetzner.de/1GB.bin',
     'https://speed.hetzner.de/100MB.bin',
     'https://speedtest.tele2.net/1GB.zip',
     'https://speedtest.tele2.net/100MB.zip',
 ]
 
-# 测速文件源（设计给反复下载，长期使用不会被限速）
-DC_SPEED_URLS = [u for u in DC_DEFAULT_URLS
-                 if 'proof.ovh.net' in u or 'speed.hetzner' in u or 'speedtest.tele2' in u]
-# 系统镜像 ISO 源（镜像站有滥用防护，适合少量轮换，不宜长期盯同一个）
-DC_MIRROR_URLS = [u for u in DC_DEFAULT_URLS if u not in DC_SPEED_URLS]
+# 测速文件源 / 镜像源分类在 dc_pick_urls 里按关键词动态划分（随机模式各抽一半）
 
 _dc_lock = threading.Lock()
+
+# 强制直连的 opener：消耗器/探测必须直连目标源站。
+# 不走系统代理（urllib 默认会读 Windows/系统代理设置，代理对 Range 请求
+# 不友好甚至 403，会把可用源误判成坏源，且代理中转也不利于满速消耗流量）
+_dc_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+# 解析顺序改「IPv4 优先、IPv6 兜底」：urllib 默认按系统 getaddrinfo 顺序
+# （多为 IPv6 优先），在 IPv6 链路不通的环境（如部分双栈/仅 IPv4 线路）会
+# 卡在 IPv6 握手超时，把可用源误判成坏源。探测与下载同路径，保持一致。
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_first_getaddrinfo(*args, **kwargs):
+    try:
+        res = _orig_getaddrinfo(*args, **kwargs)
+        return sorted(res, key=lambda x: 0 if x[0] == socket.AF_INET else 1)
+    except Exception:
+        raise
+
+
+socket.getaddrinfo = _ipv4_first_getaddrinfo
 
 
 def dc_paths(data_dir):
@@ -1986,7 +2054,7 @@ def dc_ensure_files(data_dir):
     os.makedirs(p["dldir"], exist_ok=True)
     if not os.path.exists(p["config"]):
         with open(p["config"], "w", encoding="utf-8") as f:
-            f.write('SPEED_MBPS=100\nDAILY_GB=5000\nCHECK_MINUTES=5\nDOWNLOAD_MODE=none\n')
+            f.write('SPEED_MBPS=100\nDAILY_GB=5000\nCHECK_MINUTES=5\nDOWNLOAD_MODE=none\nDOWNLOAD_ORDER=random\n')
     if not os.path.exists(p["urls"]):
         with open(p["urls"], "w", encoding="utf-8") as f:
             f.write('\n'.join(DC_DEFAULT_URLS) + '\n')
@@ -1998,7 +2066,8 @@ def dc_num(v, default):
 
 
 def dc_read_cfg(data_dir):
-    cfg = {'SPEED_MBPS': '100', 'DAILY_GB': '5000', 'CHECK_MINUTES': '5', 'DOWNLOAD_MODE': 'none'}
+    cfg = {'SPEED_MBPS': '100', 'DAILY_GB': '5000', 'CHECK_MINUTES': '5',
+           'DOWNLOAD_MODE': 'none', 'DOWNLOAD_ORDER': 'random'}
     try:
         with open(dc_paths(data_dir)["config"], encoding="utf-8") as f:
             for line in f:
@@ -2009,18 +2078,20 @@ def dc_read_cfg(data_dir):
     except Exception:
         pass
     mode = 'none'  # 下载方式固定为不落盘（数据直接丢弃、仅统计流量，不写盘不磨损硬盘）
+    order = cfg.get('DOWNLOAD_ORDER', 'random').strip().lower()
+    if order not in ('random', 'sequential'):
+        order = 'random'  # 非法值回退随机
     return {'speed': dc_num(cfg.get('SPEED_MBPS'), 100),
             'daily_gb': dc_num(cfg.get('DAILY_GB'), 5000),
             'check_minutes': dc_num(cfg.get('CHECK_MINUTES'), 5),
-            'mode': mode}
+            'mode': mode,
+            'order': order}
 
 
-def dc_read_urls(data_dir):
-    """读取实际使用的下载源。
-
-    - 用户手动编辑过 urls.txt（内容与内置默认池不一致）：原样使用用户的列表；
-    - 仍是内置默认池（或为空）：按日期做种子自动轮换——
-      每次取 2 个测速文件源 + 2 个镜像源，同一天内组合稳定、跨天自动更换。
+def dc_all_urls(data_dir):
+    """读取下载源全量池：
+    - 用户手动编辑过 urls.txt（既不等同于新版默认池、也不等同于旧版默认池）：原样使用用户的列表；
+    - 仍是内置默认池（新池或旧池，或为空/不存在）：返回新版全量池（新增源自动生效）。
     """
     urls = []
     try:
@@ -2031,14 +2102,53 @@ def dc_read_urls(data_dir):
                     urls.append(s)
     except Exception:
         pass
-    if set(urls) != set(DC_DEFAULT_URLS):
+    if not urls:
+        return list(DC_DEFAULT_URLS)
+    s = set(urls)
+    if s != set(DC_DEFAULT_URLS) and s != set(DC_LEGACY_URLS):
         return urls
-    # 纯默认池：按日期做种子，每天自动轮换（同一天内多次调用结果一致）
-    rng = random.Random(datetime.date.today().isoformat())
-    picked = list(rng.sample(DC_SPEED_URLS, min(2, len(DC_SPEED_URLS))))
-    if DC_MIRROR_URLS:
-        picked += list(rng.sample(DC_MIRROR_URLS, min(2, len(DC_MIRROR_URLS))))
-    return picked
+    return list(DC_DEFAULT_URLS)
+
+
+def dc_probe_url(url, timeout=2):
+    """下载源快速探测：Range 请求只取 1 字节，206/200 = 可用。
+    404/403/5xx/连接失败/超时 = 不可用（返回 False）。用于每轮开抽前剔除坏源。
+    强制直连（不走系统代理），与下载线程同路径。"""
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'curl/8.0.1', 'Range': 'bytes=0-0'})
+        with _dc_opener.open(req, timeout=timeout) as r:
+            return r.status in (200, 206)
+    except Exception:
+        return False
+
+
+def dc_pick_urls(urls, order, pos=0, exclude=None):
+    """按「下载源方式」开关取本轮的下载源。返回 (picked, next_pos)。
+    - random：每轮真随机抽 4 个——默认池里测速/镜像各 2 个（防盯死同一类站），
+      手动列表则全池纯随机；抽完再打乱顺序。
+    - sequential：按列表顺序取 4 个，每轮向后推进、轮完回卷（所有源都能轮上）。
+    - exclude：本轮/当日要跳过的源（已判死拉黑、已在使用等），自动过滤后再抽。
+    """
+    exclude = exclude or set()
+    cand = [u for u in urls if u not in exclude]
+    n = len(cand)
+    if n <= 0:
+        return [], pos
+    pick_n = min(4, n)
+    if order == 'sequential':
+        picked = [cand[(pos + i) % n] for i in range(pick_n)]
+        return picked, (pos + pick_n) % n
+    # random
+    if set(urls) == set(DC_DEFAULT_URLS) and n > 2:
+        speed = [u for u in cand if 'proof.ovh' in u or 'speed.hetzner' in u
+                 or 'ash-speed.hetzner' in u or 'speedtest.tele2' in u]
+        mirror = [u for u in cand if u not in speed]
+        picked = list(random.sample(speed, min(2, len(speed))))
+        picked += list(random.sample(mirror, min(2, len(mirror))))
+    else:
+        picked = list(random.sample(cand, pick_n))
+    random.shuffle(picked)
+    return picked, pos
 
 
 def dc_read_day_state(data_dir):
@@ -2090,6 +2200,9 @@ class DCDownloader:
         self.thread = None
         self.live_bytes = 0
         self.live_lock = threading.Lock()
+        self.order_pos = 0  # 顺序模式下每轮向后推进的游标（随机模式不用）
+        self.blacklist = {}  # url -> (date, fail_count)：当日判死≥2 次的源不再被抽中，跨天自动恢复
+        self._bl_lock = threading.Lock()
 
     def _dldir(self):
         return dc_paths(self.data_dir)["dldir"]
@@ -2130,16 +2243,17 @@ class DCDownloader:
     def is_alive(self):
         return self.thread is not None and self.thread.is_alive()
 
-    def _dl_url(self, u, out_path, rate_bytes, mode, done_event):
+    def _dl_url(self, u, out_path, rate_bytes, mode, done_event, fails):
         """单路下载线程：流式读取，每 256KB 立即计入 live_bytes（进度实时刷新），
-        并按下个数据块的到达时间间隔硬限速，总速率严格不超过设定值。"""
+        并按下个数据块的到达时间间隔硬限速，总速率严格不超过设定值。
+        重试 3 次仍失败：记日志并把 (url, 原因) 放进 fails，由主循环判死换源。"""
         headers = {'User-Agent': 'curl/8.0.1'}
         for attempt in range(3):
             if self.stop_event.is_set() or done_event.is_set():
                 return
             try:
                 req = urllib.request.Request(u, headers=headers)
-                with urllib.request.urlopen(req, timeout=30) as r:
+                with _dc_opener.open(req, timeout=30) as r:
                     f = open(out_path, 'wb') if mode == 'disk' else None
                     try:
                         while not self.stop_event.is_set() and not done_event.is_set():
@@ -2160,6 +2274,10 @@ class DCDownloader:
             except Exception as e:
                 if attempt == 2:
                     dc_log(self.data_dir, '下载失败 %s: %s' % (u, e))
+                    try:
+                        fails.append((u, str(e)))
+                    except Exception:
+                        pass
                 else:
                     time.sleep(2)
 
@@ -2193,12 +2311,37 @@ class DCDownloader:
                         if self.stop_event.is_set():
                             break
                     continue
-                urls = dc_read_urls(self.data_dir)
+                urls = dc_all_urls(self.data_dir)
                 if not urls:
                     dc_log(self.data_dir, 'urls.txt 没有有效链接，等待 10 分钟后重试')
                     if not self._sleep(600):
                         break
                     continue
+                # 当日黑名单（判死≥2 次的源今天不再参与抽选，跨天自动恢复）
+                with self._bl_lock:
+                    bl = {u for u, (d0, c0) in self.blacklist.items() if d0 == d and c0 >= 2}
+                # 按「下载源方式」开关抽源，并做开抽前探测：坏源剔除后重新抽，最多补抽 5 轮
+                order = cfg.get('order', 'random')
+                order_lbl = '随机' if order == 'random' else '顺序'
+                skip = set(bl)
+                picked = []
+                for _ in range(5):
+                    picked, self.order_pos = dc_pick_urls(urls, order, self.order_pos, exclude=skip)
+                    if not picked:
+                        break
+                    bad = [u for u in picked if not dc_probe_url(u)]
+                    if not bad:
+                        break
+                    for u in bad:
+                        dc_log(self.data_dir, '下载源探测失败已剔除：%s' % u.rsplit('/', 1)[-1])
+                    skip |= set(bad)
+                if not picked:
+                    dc_log(self.data_dir, '可用下载源不足（源池全部失效或已被拉黑），等待 10 分钟后重试')
+                    if not self._sleep(600):
+                        break
+                    continue
+                urls = picked
+                dc_log(self.data_dir, '本轮下载源（%s，%d 个）：%s' % (order_lbl, len(urls), ' | '.join(u.rsplit('/', 1)[-1] for u in urls)))
 
                 for f in os.listdir(self._dldir()):
                     try:
@@ -2211,17 +2354,42 @@ class DCDownloader:
                 rate_bytes = int(speed * 1000000 // n) if speed > 0 else 0
                 mode = cfg['mode']
                 done_event = threading.Event()
+                fails = []
                 threads = []
+                in_use = set()
                 for i, u in enumerate(urls, 1):
                     out = os.path.join(self._dldir(), 'f%d.dat' % i)
                     t = threading.Thread(target=self._dl_url,
-                                         args=(u, out, rate_bytes, mode, done_event), daemon=True)
+                                         args=(u, out, rate_bytes, mode, done_event, fails), daemon=True)
                     t.start()
                     threads.append(t)
-                # 轮内实时检查每日目标：累计达到即提前停止本轮下载，避免目标完成后继续超跑
+                    in_use.add(u)
+                # 轮内实时检查每日目标 + 死源替换：累计达到即提前停止本轮下载
                 while any(t.is_alive() for t in threads):
                     if self.stop_event.is_set():
                         break
+                    # 下载中判死（重试 3 次仍失败的源）：计数 → 够 2 次当日拉黑 → 本轮补抽新源顶上
+                    while fails:
+                        u, err = fails.pop(0)
+                        with self._bl_lock:
+                            d0, c0 = self.blacklist.get(u, (d, 0))
+                            if d0 != d:
+                                c0 = 0
+                            c0 += 1
+                            self.blacklist[u] = (d, c0)
+                        if c0 >= 2:
+                            dc_log(self.data_dir, '下载源已拉黑（今日不再使用）：%s（今日第 %d 次失败）' % (u.rsplit('/', 1)[-1], c0))
+                        else:
+                            dc_log(self.data_dir, '下载源失效已替换：%s（%s，今日第 %d 次失败）' % (u.rsplit('/', 1)[-1], err[:120], c0))
+                        cand = [x for x in urls if x not in in_use and x not in bl]
+                        if cand:
+                            rep = cand[0] if order == 'sequential' else random.choice(cand)
+                            in_use.add(rep)
+                            out = os.path.join(self._dldir(), 'f%d.dat' % (len(threads) + 1))
+                            t2 = threading.Thread(target=self._dl_url,
+                                                  args=(rep, out, rate_bytes, mode, done_event, fails), daemon=True)
+                            t2.start()
+                            threads.append(t2)
                     with self.live_lock:
                         cur = self.live_bytes if mode == 'none' else dc_dir_bytes(self._dldir())
                     if daily_gb > 0 and pu + cur >= target:
@@ -2283,8 +2451,9 @@ def dc_status(data_dir, downloader):
         'target_gb': cfg['daily_gb'],
         'speed_mbps': cfg['speed'],
         'mode': cfg['mode'],
+        'order': cfg['order'],
         'date': today,
-        'urls_count': len(dc_read_urls(data_dir)),
+        'urls_count': len(dc_all_urls(data_dir)),
         'log': dc_tail(dc_paths(data_dir)["runlog"], 40),
     }
 
@@ -2354,3 +2523,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+"
