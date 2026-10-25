@@ -223,6 +223,35 @@
     background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
     color: var(--text); font-size: 13px; font-family: Consolas, Menlo, monospace; resize: vertical;
   }
+  #dc-urls { height: 120px; }
+
+  /* 下行带宽消耗器设置子区（与整体卡片风格统一） */
+  .dc-sub {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 14px; margin-top: 10px;
+  }
+  .dc-sub h3 {
+    font-size: 13px; font-weight: 600; color: var(--text);
+    display: flex; align-items: center; gap: 8px; margin: 0 0 8px;
+  }
+  .dc-sub h3 .dot { width: 3px; height: 12px; background: var(--accent); border-radius: 2px; display: inline-block; }
+
+  /* 折叠卡片（自定义下载源） */
+  .fold-head {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    user-select: none; padding: 2px 0;
+  }
+  .fold-head:hover .fold-title { color: var(--accent); }
+  .fold-title {
+    font-size: 13px; font-weight: 600; color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .fold-title .dot { width: 3px; height: 12px; background: var(--accent); border-radius: 2px; display: inline-block; }
+  .fold-state { font-size: 11px; color: var(--muted); margin-left: auto; }
+  .fold-arrow { color: var(--muted); font-size: 12px; transition: transform .2s; }
+  .fold.open .fold-arrow { transform: rotate(90deg); }
+  .fold-body { display: none; margin-top: 10px; }
+  .fold.open .fold-body { display: block; }
   .row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
   .msg { font-size: 13px; margin-left: 4px; }
   .msg.ok { color: var(--green); }
@@ -408,37 +437,51 @@
     <span class="msg" id="dc-msg"></span>
   </div>
 
-  <h2 style="margin-top:16px"><span class="dot"></span>参数设置</h2>
-  <label class="lbl">下行限速（MB/s）：写多少跑多少，例如 100 = 每秒 100 兆字节，填 <b style="color:var(--yellow)">0</b> = 不限速</label>
-  <input type="number" id="dc-speed" min="0" max="99999" placeholder="100">
-  <label class="lbl">每日消耗目标（GB）：填 <b style="color:var(--yellow)">0</b> = 不限流量</label>
-  <input type="number" id="dc-daily" min="0" max="9999999" placeholder="5000">
-  <label class="lbl">达成后复查间隔（分钟）：目标达成后每 N 分钟复查一次（改大目标即可立即继续），填 <b style="color:var(--yellow)">0</b> = 达成后彻底暂停，等明天自动恢复</label>
-  <input type="number" id="dc-check" min="0" max="1440" placeholder="5">
-  <label class="lbl">下载方式：不落盘（固定）</label>
-  <div class="desc" style="margin-top:6px">不落盘：数据直接丢弃，仅统计流量，不写盘不磨损硬盘。本应用固定为不落盘运行。</div>
-  <label class="lbl">下载源方式：</label>
-  <div class="seg" id="dc-order" style="margin-bottom:6px">
-    <button type="button" data-v="random" onclick="dcSetOrder('random', this)">随机</button>
-    <button type="button" data-v="sequential" onclick="dcSetOrder('sequential', this)">顺序</button>
-  </div>
-  <div class="desc" style="margin-top:2px">随机：每轮从源池随机抽 4 个（2 测速 + 2 镜像），来源不固定、防限速；顺序：按列表每轮取 4 个轮询推进，所有源都能轮上。</div>
-  <div class="row">
-    <button class="btn accent" onclick="dcSaveConfig()">保存参数</button>
-    <span class="msg" id="dc-cfg-msg"></span>
-  </div>
-
-  <h2 style="margin-top:16px"><span class="dot"></span>下载源（urls.txt）</h2>
-  <div class="desc">每行一个链接，<b style="color:var(--text)">#</b> 开头为注释。默认源均为公开合法大文件（测速文件 / 开源镜像）。<b style="color:var(--accent)">随机</b>：每轮从源池随机抽 4 个（2 测速 + 2 镜像），来源不固定；<b style="color:var(--accent)">顺序</b>：按列表顺序每轮取 4 个轮询推进；手动添加的源同样参与随机/顺序。</div>
-  <textarea id="dc-urls" spellcheck="false"></textarea>
-  <div class="row">
-    <button class="btn accent" onclick="dcSaveUrls()">保存下载源</button>
-    <button class="btn ghost" onclick="dcResetUrls()">恢复默认源</button>
-    <span class="msg" id="dc-url-msg"></span>
+  <div class="dc-sub">
+    <h3><span class="dot"></span>参数设置</h3>
+    <label class="lbl">下行限速（MB/s）：写多少跑多少，例如 100 = 每秒 100 兆字节，填 <b style="color:var(--yellow)">0</b> = 不限速</label>
+    <input type="number" id="dc-speed" min="0" max="99999" placeholder="100">
+    <label class="lbl">每日消耗目标（GB）：填 <b style="color:var(--yellow)">0</b> = 不限流量</label>
+    <input type="number" id="dc-daily" min="0" max="9999999" placeholder="5000">
+    <label class="lbl">达成后复查间隔（分钟）：目标达成后每 N 分钟复查一次（改大目标即可立即继续），填 <b style="color:var(--yellow)">0</b> = 达成后彻底暂停，等明天自动恢复</label>
+    <input type="number" id="dc-check" min="0" max="1440" placeholder="5">
+    <label class="lbl">下载方式：不落盘（固定）</label>
+    <div class="desc" style="margin-top:6px">不落盘：数据直接丢弃，仅统计流量，不写盘不磨损硬盘。本应用固定为不落盘运行。</div>
+    <label class="lbl">下载源方式：</label>
+    <div class="seg" id="dc-order" style="margin-bottom:6px">
+      <button type="button" data-v="random" onclick="dcSetOrder('random', this)">随机</button>
+      <button type="button" data-v="sequential" onclick="dcSetOrder('sequential', this)">顺序</button>
+    </div>
+    <div class="desc" style="margin-top:2px">随机：每轮从源池随机抽 4 个（2 测速 + 2 镜像），来源不固定、防限速；顺序：按列表每轮取 4 个轮询推进，所有源都能轮上。</div>
+    <div class="row">
+      <button class="btn accent" onclick="dcSaveConfig()">保存参数</button>
+      <span class="msg" id="dc-cfg-msg"></span>
+    </div>
   </div>
 
-  <h2 style="margin-top:16px"><span class="dot"></span>运行日志</h2>
-  <pre id="dc-log">-</pre>
+  <div class="dc-sub">
+    <div class="fold" id="dc-urls-fold">
+      <div class="fold-head" onclick="dcToggleUrls()">
+        <span class="fold-title"><span class="dot"></span>自定义下载源</span>
+        <span class="fold-state" id="dc-urls-state">--</span>
+        <span class="fold-arrow">▶</span>
+      </div>
+      <div class="fold-body">
+        <div class="desc">每行一个链接，<b style="color:var(--text)">#</b> 开头为注释。只显示你自定义的源；未添加时自动使用内置默认源池（公开测速文件 / 开源镜像）。<b style="color:var(--accent)">随机</b>：每轮从源池随机抽 4 个（2 测速 + 2 镜像）；<b style="color:var(--accent)">顺序</b>：按列表每轮取 4 个轮询推进；手动添加的源同样参与。</div>
+        <textarea id="dc-urls" spellcheck="false" placeholder="每行一个下载链接，留空 = 使用内置默认源池"></textarea>
+        <div class="row">
+          <button class="btn accent" onclick="dcSaveUrls()">保存下载源</button>
+          <button class="btn ghost" onclick="dcResetUrls()">清空自定义源</button>
+          <span class="msg" id="dc-url-msg"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dc-sub">
+    <h3><span class="dot"></span>运行日志</h3>
+    <pre id="dc-log">-</pre>
+  </div>
 </div>
 
 <div class="panel" id="panel-history">
@@ -1280,9 +1323,21 @@ async function dcLoadUrls(){
   try {
     const r = await fetch('/api/dc/urls', { headers: { 'X-Auth-Token': dcTok() } });
     const data = await r.json();
-    if (data.ok) $('dc-urls').value = data.urls;
+    if (data.ok) {
+      $('dc-urls').value = data.urls || '';
+      const n = (data.urls || '').split('\n').map(s => s.trim()).filter(s => s && !s.startsWith('#')).length;
+      $('dc-urls-state').textContent = data.customized ? ('自定义 ' + n + ' 条') : '使用内置默认源池';
+    }
   } catch(e) {}
 }
+function dcToggleUrls(){
+  const f = $('dc-urls-fold');
+  const open = f.classList.toggle('open');
+  try { localStorage.setItem('dc_urls_open', open ? '1' : '0'); } catch(e) {}
+}
+(function(){
+  try { if (localStorage.getItem('dc_urls_open') === '1') $('dc-urls-fold').classList.add('open'); } catch(e) {}
+})();
 function dcSetOrder(v, el){
   document.querySelectorAll('#dc-order button').forEach(b => b.classList.remove('active'));
   el.classList.add('active');
@@ -1320,9 +1375,9 @@ async function dcSaveUrls(){
   dcShowMsg('dc-url-msg', r.ok, r.ok ? '下载源已保存' : (r.error || '保存失败'));
 }
 async function dcResetUrls(){
-  if (!confirm('确定恢复为内置默认下载源吗？当前自定义列表将被覆盖。')) return;
+  if (!confirm('确定清空所有自定义下载源吗？清空后下载器将自动使用内置默认源池。')) return;
   const r = await dcJpost('/api/dc/urls/reset', {});
-  dcShowMsg('dc-url-msg', r.ok, r.ok ? '已恢复为内置默认源' : (r.error || '恢复失败'));
+  dcShowMsg('dc-url-msg', r.ok, r.ok ? '已清空自定义源（回退内置默认源池）' : (r.error || '清空失败'));
   if (r.ok) dcLoadUrls();
 }
 async function dcAct(a){

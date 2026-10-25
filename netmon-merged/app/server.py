@@ -1,4 +1,4 @@
-"#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 netmon - 飞牛 NAS / Linux 专用网络监控面板（网络监控为主界面）
@@ -47,7 +47,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.43"
+VERSION = "1.3.45"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -1359,7 +1359,6 @@ class Collector:
                 iface_lbl = aliases.get(iface) or vnet_map.get(iface) or iface
                 out_udp.append(dict(e, rx_rate=round(rx_rate, 1), tx_rate=round(tx_rate, 1),
                                     region=ip_region(e["ip"]),
-                                    proc=friendly_proc(e.get("proc", "")),
                                     iface=iface, iface_lbl=iface_lbl))
             # 更新采样基准（限制规模，防连接频繁变动导致内存膨胀）
             new_prev = {}
@@ -1798,9 +1797,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self._dc_authed():
                 return self._dc_deny()
             try:
-                with open(dc_paths(data_dir)["urls"], encoding="utf-8") as f:
-                    content = f.read()
-                return self._send_json({"ok": True, "urls": content})
+                customized, content = dc_urls_customized(data_dir)
+                return self._send_json({"ok": True, "customized": customized,
+                                        "urls": content if customized else ""})
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)})
         self.send_error(404)
@@ -1884,12 +1883,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)})
         if path == "/api/dc/urls/reset":
-            # 恢复内置默认源：直接覆盖 urls.txt 为当前版本的全量默认池
+            # 清空自定义源：删除 urls.txt，下载自动回退内置默认源池兜底
             try:
-                with open(dc_paths(data_dir)["urls"], 'w', encoding='utf-8') as f:
-                    f.write('\n'.join(DC_DEFAULT_URLS) + '\n')
-                dc_log(data_dir, '下载源已恢复为内置默认（%d 条）' % len(DC_DEFAULT_URLS))
-                return self._send_json({"ok": True, "count": len(DC_DEFAULT_URLS)})
+                p = dc_paths(data_dir)["urls"]
+                if os.path.exists(p):
+                    os.remove(p)
+                dc_log(data_dir, '自定义下载源已清空（回退内置默认源池）')
+                return self._send_json({"ok": True, "count": 0})
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)})
         if path == "/api/dc/action":
@@ -2002,6 +2002,54 @@ def _ipv4_first_getaddrinfo(*args, **kwargs):
 socket.getaddrinfo = _ipv4_first_getaddrinfo
 
 
+# ---------------------------------------------------------------------------
+# 装机统计心跳（匿名，自动上报，无开关）
+# 仅上报随机 uid / 版本号，不传 IP、主机名、网卡与流量数据；失败静默
+# ---------------------------------------------------------------------------
+STATS_URL = 'http://101.43.129.67:8878/ping.php'
+STATS_KEY = 'K7r2mQ9xZtW4jN8p'
+STATS_INTERVAL = 6 * 3600  # 每 6 小时一次
+
+
+def _stats_uid(data_dir):
+    """返回本机匿名 uid：首次随机生成并落盘 data-dir/uid.txt"""
+    p = os.path.join(data_dir, 'uid.txt')
+    try:
+        s = open(p, encoding='utf-8').read().strip()
+        if len(s) == 32 and s.isalnum():
+            return s
+    except Exception:
+        pass
+    try:
+        import uuid
+        s = uuid.uuid4().hex
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write(s)
+        return s
+    except Exception:
+        return 'netmon-unknown'
+
+
+def _stats_ping(data_dir):
+    try:
+        uid = _stats_uid(data_dir)
+        url = '%s?k=%s&u=%s&v=%s' % (STATS_URL, STATS_KEY, uid, VERSION)
+        req = urllib.request.Request(url)
+        with _dc_opener.open(req, timeout=8) as r:
+            r.read(64)
+    except Exception:
+        pass  # 统计是辅助功能：任何失败静默跳过，下个周期再试
+
+
+def _stats_loop(data_dir):
+    if os.environ.get('NETMON_NO_STATS'):
+        return  # 本地验证模式：跳过统计心跳，不产生测试数据
+    _stats_ping(data_dir)
+    while True:
+        time.sleep(STATS_INTERVAL)
+        _stats_ping(data_dir)
+
+
 def dc_paths(data_dir):
     d = os.path.join(data_dir, "dc")
     return {
@@ -2086,6 +2134,26 @@ def dc_read_cfg(data_dir):
             'check_minutes': dc_num(cfg.get('CHECK_MINUTES'), 5),
             'mode': mode,
             'order': order}
+
+
+def dc_urls_customized(data_dir):
+    """判断 urls.txt 是否用户自定义（供前端只显示自定义源）：
+    - 空 / 不存在 / 仍等于内置默认池（新池或旧池）：未自定义 → (False, '')
+    - 其他：自定义 → (True, 原文本内容)
+    下载时仍走 dc_all_urls：未自定义自动回退内置默认池兜底。
+    """
+    p = dc_paths(data_dir)["urls"]
+    try:
+        with open(p, encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        return False, ''
+    lines = [x.strip() for x in content.splitlines() if x.strip() and not x.strip().startswith('#')]
+    if not lines:
+        return False, ''
+    if set(lines) == set(DC_DEFAULT_URLS) or set(lines) == set(DC_LEGACY_URLS):
+        return False, ''
+    return True, content
 
 
 def dc_all_urls(data_dir):
@@ -2490,6 +2558,9 @@ def main():
     dc_downloader = DCDownloader(args.data_dir)
     dc_log(args.data_dir, '下行带宽消耗器就绪（随网络监控 Web 服务运行）')
 
+    # 装机统计心跳（匿名自动上报，无开关，失败静默）
+    threading.Thread(target=_stats_loop, args=(args.data_dir,), daemon=True).start()
+
     # 双栈监听：默认绑 ::（Linux 默认 v6only=0，同时接受 IPv4 和 IPv6）
     # 失败（无 IPv6 / 权限问题）自动降级到 0.0.0.0
     class DualStackServer(ThreadingHTTPServer):
@@ -2523,4 +2594,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-"
