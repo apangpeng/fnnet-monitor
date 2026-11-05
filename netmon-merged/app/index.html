@@ -1084,9 +1084,11 @@ async function refreshConnTop() {
     const isUdp = k[0] === "U";
     const rx = connAvg(h.rx), tx = connAvg(h.tx);
     const stale = now - h.last > 9000;   // 超过 9 秒无新采样 → 保留中（半透明显示）
+    const loopback = (r.ip === "127.0.0.1" || r.ip === "::1" || r.ip.startsWith("::ffff:127."));
     const procTxt = isUdp ? "UDP（conntrack，无进程名）"
       : (r.ct ? "TCP（conntrack，无进程名）"
-         : ((r.proc && r.proc !== "?") ? r.proc : "未知进程") + (r.pid ? " · PID " + r.pid : ""));
+         : ((r.proc && r.proc !== "?") ? r.proc + (r.pid ? " · PID " + r.pid : "")
+            : (loopback ? "系统/内核连接（无用户态进程）" : "虚拟机/容器内进程（宿主机无法反查）")));
     rows.push({ip: r.ip, region: r.region, iface_lbl: r.iface_lbl, type: isUdp ? "UDP" : "TCP",
                procTxt, rx, tx, rxr: r.rx, txr: r.tx, conns: r.conns, stale});
   }
