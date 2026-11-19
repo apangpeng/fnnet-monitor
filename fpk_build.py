@@ -8,8 +8,8 @@ import io
 import os
 import tarfile
 
-ROOT = r"C:\Users\Administrator\Downloads\new-chat-4\new-chat-4\netmon-merged"
-OUT = r"C:\Users\Administrator\Downloads\new-chat-4\new-chat-4\网络监控-1.3.41-内置下行带宽消耗器.fpk"
+ROOT = r"C:\Users\Administrator\Downloads\网络\new-chat-4\netmon-merged"
+OUT = r"C:\Users\Administrator\Downloads\网络\new-chat-4\网络监控-1.3.48-内置下行带宽消耗器.fpk"
 
 
 def add_tree(tf, src_dir, arc_prefix=""):
@@ -33,7 +33,7 @@ with tarfile.open(OUT, "w:gz") as fpk:
     info = tarfile.TarInfo("app.tgz")
     info.size = len(app_tgz)
     fpk.addfile(info, io.BytesIO(app_tgz))
-    for name in ("manifest", "cmd", "config", "wizard", "ICON.PNG", "ICON_256.PNG"):
+    for name in ("manifest", "cmd", "config", "wizard", "ui", "ICON.PNG", "ICON_256.PNG"):
         p = os.path.join(ROOT, name)
         if os.path.isdir(p):
             add_tree(fpk, p, name)

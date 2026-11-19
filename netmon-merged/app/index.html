@@ -682,6 +682,23 @@ function needSetup(){
   if ($('dc-auth-overlay').style.display !== 'block') $('dc-in-auth').value = '';
   $('dc-auth-overlay').style.display = 'block';
 }
+// 飞牛统一网关（https://NAS:5667/app/netmon）下页面处在 /app/netmon 前缀中，
+// 而所有接口都用 /api/... 绝对路径，需要统一补前缀；用端口直连时自动不生效。
+(function(){
+  var m = location.pathname.match(/^\/app\/[^\/]+/);
+  if (!m) return;
+  var prefix = m[0];
+  var origFetch = window.fetch;
+  window.fetch = function(input, init){
+    try {
+      if (typeof input === 'string' && input.charAt(0) === '/' && input.indexOf(prefix + '/') !== 0) {
+        input = prefix + input;
+      }
+    } catch(e) {}
+    return origFetch.call(this, input, init);
+  };
+})();
+
 function authHeaders(extra){
   const h = {};
   if (netTok()) h['X-Auth-Token'] = netTok();

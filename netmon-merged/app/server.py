@@ -36,6 +36,7 @@ import random
 import re
 import signal
 import socket
+import socketserver
 import sqlite3
 import struct
 import subprocess
@@ -47,7 +48,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.3.47"
+VERSION = "1.3.48"
 
 # 虚拟网卡前缀（在"物理网卡"视图里默认过滤，但在"全部网卡"里仍展示）
 VIRT_PREFIXES = ("docker", "veth", "br-", "virbr", "vnet", "tun", "tap",
@@ -1395,10 +1396,71 @@ class Collector:
 
 STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# 飞牛统一网关前缀：桌面窗口通过 https://NAS:5667/app/netmon 访问，
+# 网关转发到应用 Socket 时可能保留该前缀，处理请求前统一剥掉。
+GATEWAY_PREFIX = os.environ.get("NETMON_GATEWAY_PREFIX", "/app/netmon")
+
+
+def strip_gateway_prefix(path):
+    """去掉统一网关前缀；兼容带前缀与不带前缀两种转发形态。"""
+    pref = GATEWAY_PREFIX
+    if not pref:
+        return path
+    for p in (pref, "/netmon" if pref == "/app/netmon" else pref):
+        if path == p:
+            return "/"
+        if path.startswith(p + "/"):
+            return path[len(p):]
+    return path
+
+
+if hasattr(socketserver, "ThreadingUnixStreamServer"):
+    class UnixSocketServer(socketserver.ThreadingUnixStreamServer):
+        """飞牛统一网关接入：在 Unix domain socket 上提供 HTTP 服务。
+
+        网关把 https://<NAS>:5667/app/netmon 的请求转发到本 socket，
+        因此飞牛桌面窗口与主站同源，不存在 https 页面加载 http 内容的混合内容问题。
+        """
+
+        daemon_threads = True
+        address_family = socket.AF_UNIX
+
+        def __init__(self, socket_path, handler_class, **attrs):
+            self.socket_path = socket_path
+            if os.path.exists(socket_path):
+                try:
+                    os.unlink(socket_path)
+                except OSError:
+                    pass
+            socketserver.ThreadingUnixStreamServer.__init__(
+                self, socket_path, handler_class, bind_and_activate=False)
+            self.server_name = "netmon"
+            self.server_port = 0
+            try:
+                self.server_bind()
+                self.server_activate()
+            except Exception:
+                self.server_close()
+                raise
+            # 网关进程通常不是 root：socket 必须对其他用户可读写，否则网关连不上
+            for mode in (0o777, 0o666):
+                try:
+                    os.chmod(socket_path, mode)
+                    break
+                except OSError:
+                    continue
+            for k, v in attrs.items():
+                setattr(self, k, v)
+
+        def get_request(self):
+            request, _addr = self.socket.accept()
+            return request, ("unix-socket", 0)
+else:  # 极端环境兜底：不支持 Unix Socket 时只保留端口访问
+    UnixSocketServer = None
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "netmon/" + VERSION
-
     def log_message(self, fmt, *args):
         pass  # 静默
 
@@ -1546,6 +1608,7 @@ class Handler(BaseHTTPRequestHandler):
                     "current": VERSION}
 
     def do_GET(self):
+        self.path = strip_gateway_prefix(self.path)
         u = urlparse(self.path)
         qs = parse_qs(u.query)
         path = u.path
@@ -1610,6 +1673,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
+        self.path = strip_gateway_prefix(self.path)
         u = urlparse(self.path)
         if not self._auth_unprotected(u.path) and not self._auth_ok():
             return self._auth_deny()
@@ -2542,6 +2606,8 @@ def main():
     ap.add_argument("--interval", type=int, default=2, help="实时采样间隔秒")
     ap.add_argument("--history-interval", type=int, default=60, help="历史写库间隔秒")
     ap.add_argument("--retention-days", type=int, default=7)
+    ap.add_argument("--socket", default="",
+                    help="飞牛统一网关 Unix Socket 路径（如 <应用目录>/app.sock）；留空则不启用")
     args = ap.parse_args()
 
     os.makedirs(args.data_dir, exist_ok=True)
@@ -2585,10 +2651,33 @@ def main():
     httpd.auth_fails = {}   # ip -> {fails, lock_until}，统一口令爆破防护
     print("netmon %s listening on http://%s:%d  (data=%s)" %
           (VERSION, listen_desc, args.port, args.data_dir))
+
+    # 飞牛统一网关：额外监听 Unix Socket，网关把 https://NAS:5667/app/netmon 的请求转发到这里。
+    # 与 TCP 端口并行，端口直连（http://NAS:8778）继续可用，互不影响。
+    usock_server = None
+    if args.socket:
+        if UnixSocketServer is None:
+            print("[netmon] 当前环境不支持 Unix Socket，跳过统一网关接入（端口访问不受影响）")
+        else:
+            try:
+                usock_server = UnixSocketServer(args.socket, Handler,
+                                                collector=collector, auth_fails={})
+                threading.Thread(target=usock_server.serve_forever, daemon=True).start()
+                print("netmon 统一网关 socket 已就绪: %s" % args.socket)
+            except Exception as e:
+                print("[netmon] 统一网关 socket 监听失败 (%s)，端口访问不受影响" % e)
+                usock_server = None
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         collector.stop()
+        if usock_server is not None:
+            try:
+                usock_server.shutdown()
+                os.unlink(args.socket)
+            except Exception:
+                pass
         print("\nstopped")
 
 

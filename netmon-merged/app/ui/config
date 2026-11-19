@@ -4,9 +4,10 @@
             "title": "网络监控",
             "icon": "images/icon-{0}.png",
             "type": "iframe",
-            "protocol": "http",
-            "port": "8778",
-            "url": "/",
+            "protocol": "",
+            "gatewayPrefix": "/app/netmon",
+            "gatewaySocket": "app.sock",
+            "url": "/app/netmon",
             "allUsers": true
         }
     }

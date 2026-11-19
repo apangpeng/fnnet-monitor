@@ -21,7 +21,11 @@ if [ -f "$CONFIG" ]; then
     [ -n "$R" ] && RETENTION="$R"
 fi
 
+SOCKET_FILE="${APP_DIR}/app.sock"
 SERVICE_CMD="$PYTHON $APP_DIR/server.py --port $PORT --host :: --data-dir $TRIM_PKGVAR --interval $INTERVAL --retention-days $RETENTION"
+if [ -n "$APP_DIR" ]; then
+    SERVICE_CMD="$SERVICE_CMD --socket $SOCKET_FILE"
+fi
 
 is_running() {
     [ -f "$PID_FILE" ] || return 1
@@ -76,6 +80,7 @@ stop() {
         fi
         rm -f "$PID_FILE"
     fi
+    rm -f "${SOCKET_FILE}" 2>/dev/null || true
     echo "$APP_NAME stopped"
     return 0
 }
